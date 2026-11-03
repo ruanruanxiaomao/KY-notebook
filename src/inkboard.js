@@ -103,16 +103,17 @@ export class InkBoard {
   _pathFor(st) {
     const ctx = this.ctx;
     const pts = st.pts;
-    if (pts.length < 2) return;
+    // pts 是三元组 [x, y, 压力, x, y, 压力, ...]，必须按 3 步长读，按 2 步长会把压力当坐标画成乱线
+    const n = Math.floor(pts.length / 3);
+    if (n < 1) return;
     ctx.beginPath();
-    if (pts.length === 2) { ctx.moveTo(pts[0], pts[1]); ctx.lineTo(pts[0] + 0.01, pts[1]); return; }
+    if (n === 1) { ctx.moveTo(pts[0], pts[1]); ctx.lineTo(pts[0] + 0.01, pts[1]); return; }
     ctx.moveTo(pts[0], pts[1]);
-    for (let i = 2; i + 1 < pts.length; i += 2) {
-      const x0 = pts[i - 2], y0 = pts[i - 1];
-      const x1 = pts[i], y1 = pts[i + 1];
-      const nx = pts[i + 2], ny = pts[i + 3];
-      const mx = (x1 + (nx === undefined ? x1 : nx)) / 2;
-      const my = (y1 + (ny === undefined ? y1 : ny)) / 2;
+    for (let i = 1; i < n; i++) {
+      const x1 = pts[i * 3], y1 = pts[i * 3 + 1];
+      const j = i + 1;
+      const mx = j < n ? (x1 + pts[j * 3]) / 2 : x1;
+      const my = j < n ? (y1 + pts[j * 3 + 1]) / 2 : y1;
       ctx.quadraticCurveTo(x1, y1, mx, my);
     }
   }
