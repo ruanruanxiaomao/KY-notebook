@@ -124,3 +124,20 @@ docs/screenshots/ 截图
 ## 许可
 
 MIT。参考过的实现：perfect-freehand（压感轮廓思路）、pdf.js（Apache-2.0）、MathJax（Apache-2.0）。
+
+## 安卓版（可选）
+
+仓库里带了 `android/` 一套**不依赖 Android Studio** 的打包壳：
+
+- 原生壳不打 `file://`（那样 ES module 会被拦），而是在 App 内起一个只监听 `127.0.0.1` 的静态服务器（端口 18342），WebView 用 `http://127.0.0.1:18342/` 打开同一套网页；`/proxy` 也由这个本地服务器转发，所以网页里的 CORS 兜底在手机上同样生效。
+- 导出 PNG / JSON 时，`android-shim.js` 会把 Blob 交给原生，存进手机「下载/KY-notebook/」。
+- 拍照、选图走系统文件选择器；AI 接口和网页版一样在「设置」里填。
+
+自己打包（需要 JDK 8+ 和一个 Android 基座 APK，见 `android/build_apk.py` 顶部常量）：
+
+```bash
+python android/build_apk.py --ver 0.1.2 --code 3
+# 输出 dist-android/KY-notebook-<ver>.apk
+```
+
+已构建的安装包见 [Releases](https://github.com/ruanruanxiaomao/KY-notebook/releases)。
