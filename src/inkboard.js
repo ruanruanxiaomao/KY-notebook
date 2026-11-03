@@ -48,13 +48,25 @@ export class InkBoard {
     const s = Math.min(availW / PAGE_W, availH / PAGE_H, 1) * this.zoom;
     const cssW = Math.round(PAGE_W * s);
     const cssH = Math.round(PAGE_H * s);
-    this._s = cssW / PAGE_W;
+    const dpr = window.devicePixelRatio || 1;
+    const bw = Math.round(cssW * dpr);
+    const bh = Math.round(cssH * dpr);
+    /* 尺寸没变就直接返回：改 canvas.width 会清空画布，若再触发 ResizeObserver 回调就会
+       形成「改尺寸 → 回调 → 再改」的抖动循环 */
+    if (cssW === this._cssW && cssH === this._cssH && bw === this.cv.width && bh === this.cv.height) return;
+    this._cssW = cssW;
+    this._cssH = cssH;
     this.paper.style.width = cssW + 'px';
     this.paper.style.height = cssH + 'px';
-    const dpr = window.devicePixelRatio || 1;
-    this.cv.width = Math.round(cssW * dpr);
-    this.cv.height = Math.round(cssH * dpr);
-    this._k = s * dpr;
+    /* canvas 的 CSS 尺寸必须和纸面一致：只设 width/height 属性时，元素按属性像素（= CSS × dpr）
+       显示，高分屏上画布会比纸面大一圈、墨迹追不上鼠标 */
+    this.cv.style.width = cssW + 'px';
+    this.cv.style.height = cssH + 'px';
+    this.cv.width = bw;
+    this.cv.height = bh;
+    /* 页面坐标 → 设备像素用真实 backing 尺寸算（避免 round 累积误差） */
+    this._k = bw / PAGE_W;
+    this._s = this._k / dpr;
     this.redraw();
   }
 
@@ -144,8 +156,11 @@ export class InkBoard {
   /* ---------- 输入 ---------- */
   _pt(e) {
     const r = this.cv.getBoundingClientRect();
-    const x = (e.clientX - r.left) / this._s;
-    const y = (e.clientY - r.top) / this._s;
+    /* 用「实际显示宽度 / 页面宽度」换算，而不是缓存下来的 _s：窗口缩放、CSS 变换、dpr 变化时
+       缓存的 _s 会和真实显示尺寸脱节，笔迹就会跟不上鼠标（抖动/画歪） */
+    const s = (r.width / PAGE_W) || this._s;
+    const x = (e.clientX - r.left) / s;
+    const y = (e.clientY - r.top) / s;
     const p = typeof e.pressure === 'number' && e.pressure > 0 ? e.pressure : 0.5;
     return [x, y, p];
   }
@@ -170,15 +185,18 @@ export class InkBoard {
       if (!this._st) return;
       e.preventDefault();
       const evs = (typeof e.getCoalescedEvents === 'function' && e.getCoalescedEvents()) || [e];
+      let added = false;
       for (const ev of evs) {
         const p = this._pt(ev);
         const pts = this._st.pts;
         const lx = pts[pts.length - 3], ly = pts[pts.length - 2];
         if (Math.hypot(p[0] - lx, p[1] - ly) < 1.2) continue;
         pts.push(p[0], p[1], p[2]);
-        this._paintStroke(this._st);   // 增量：整条重画（笔画点少，够快）
-        this.redraw();
+        added = true;
       }
+      /* 一次 pointermove 里可能合并了多个采样点：整条重画一次就够，
+         以前每个采样点都整幅重画（画布清空→重画所有笔画），高分屏/多笔画时会明显掉帧 */
+      if (added) this.redraw();
     };
     const up = () => {
       if (!this._st) return;
