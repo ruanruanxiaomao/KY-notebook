@@ -43,6 +43,20 @@ export function renderMarkdown(md) {
       continue;
     }
 
+    /* 独立成行的 display 公式：\[ ... \] / $$ ... $$，中间可能有空行，整体收进一个段落 */
+    const dm = /^\s*(\$\$|\\\[)\s*$/.exec(line);
+    if (dm) {
+      closeList();
+      const open = dm[1];
+      const close = open === '$$' ? '$$' : '\\]';
+      const buf = [];
+      i++;
+      while (i < lines.length && lines[i].trim() !== close) { buf.push(lines[i]); i++; }
+      if (i < lines.length) i++;   // 跳过闭合行
+      out.push('<p class="math-block">' + inline(open + '\n' + buf.join('\n') + '\n' + close) + '</p>');
+      continue;
+    }
+
     if (/^\s*$/.test(line)) { closeList(); i++; continue; }
 
     if (/^\s*\|.*\|\s*$/.test(line) && /^\s*\|?[\s:|-]+\|?\s*$/.test(lines[i + 1] || '')) {
@@ -75,9 +89,31 @@ export function renderMarkdown(md) {
       i++;
       continue;
     }
+    if (/^\s*(-{3,}|\*{3,}|_{3,})\s*$/.test(line)) {
+      closeList();
+      out.push('<hr>');
+      i++;
+      continue;
+    }
+
     closeList();
-    out.push('<p>' + inline(line) + '</p>');
-    i++;
+    /* 连续的普通行合成一个段落：MathJax 需要 \[ ... \] 落在同一个文本节点里才认得出 */
+    const buf = [];
+    while (i < lines.length) {
+      const l = lines[i];
+      if (/^\s*$/.test(l)) break;
+      if (/^\s*```/.test(l)) break;
+      if (/^\s*(\$\$|\\\[)\s*$/.test(l)) break;
+      if (/^\s*\|.*\|\s*$/.test(l) && /^\s*\|?[\s:|-]+\|?\s*$/.test(lines[i + 1] || '')) break;
+      if (/^(#{1,6})\s+/.test(l)) break;
+      if (/^\s*>\s?/.test(l)) break;
+      if (/^\s*[-*+]\s+/.test(l)) break;
+      if (/^\s*\d+[.)]\s+/.test(l)) break;
+      if (/^\s*(-{3,}|\*{3,}|_{3,})\s*$/.test(l)) break;
+      buf.push(l);
+      i++;
+    }
+    out.push('<p>' + inline(buf.join('\n')) + '</p>');
   }
   closeList();
   return out.join('\n');
@@ -98,8 +134,8 @@ export function typeset(el) {
 
 /** 数学区段之外裸写的 LaTeX 间距命令（模型常写 \quad 分隔选项），换成普通空格 */
 function stripBareLatex(text) {
-  return String(text || '').split(/(\$\$[\s\S]*?\$\$|\$[^$\n]*\$)/).map((seg, i) => {
-    if (i % 2 === 1) return seg; // 交替：数学区段原样保留
+  return String(text || '').split(/(\$\$[\s\S]*?\$\$|\\\[[\s\S]*?\\\]|\\\([\s\S]*?\\\)|\$[^$\n]*\$)/).map((seg, i) => {
+    if (i % 2 === 1) return seg; // 交替：数学区段原样保留（含 \[ \]、\( \)、$$ $$、$ $）
     return seg.replace(/\\(quad|qquad|;|,|!|:)(?![a-zA-Z])/g, ' ');
   }).join('');
 }

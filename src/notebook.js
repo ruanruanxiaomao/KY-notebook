@@ -93,7 +93,7 @@ export function initNotebook() {
     st.note.pageCount = st.pages.length;
     st.note.updatedAt = Date.now();
     st.note.title = titleEl.value.trim() || '未命名笔记';
-    st.note.thumb = board.thumb(320);
+    st.note.thumb = await board.thumb(320);
     await store.putNote({ ...st.note });
     renderLib();
   }
@@ -140,8 +140,9 @@ export function initNotebook() {
     localStorage.setItem(LS_LAST, id);
   }
 
-  function closeNote() {
-    saveNow();
+  async function closeNote() {
+    /* 先等这一页存完再清状态：saveNow 后半段还要写 note.thumb / updatedAt */
+    await saveNow();
     st.note = null;
     st.pages = [];
     edEl.hidden = true;

@@ -1,7 +1,7 @@
 /* 手写画板引擎：页面坐标固定 W×H，canvas 只负责显示
    - 笔画数据结构：{ t:'pen'|'hl'|'er', c, w, pts:[x,y,p, x,y,p, ...] }
    - 撤销/重做是「笔画数组快照」，橡皮也当作一种笔画重放
-   - 模板只影响纸面背景（CSS），不画进 canvas；导出时补一层纸色
+   - 模板平时只影响纸面背景（CSS），不画进 canvas；导出 PNG 时由 _paintTemplate 补画
 */
 export const PAGE_W = 1414;
 export const PAGE_H = 1000;
@@ -82,6 +82,7 @@ export class InkBoard {
       this.paper.style.backgroundImage = '';
       this.paper.style.backgroundSize = '';
       this.paper.style.backgroundPosition = '';
+      this.paper.style.backgroundRepeat = '';   // 恢复由模板 class 控制的 repeat
     }
   }
 
@@ -157,6 +158,8 @@ export class InkBoard {
       const t = this.tool;
       const st = { t, c: this.color, w: this.size, pts: [] };
       this._st = st;
+      /* 在落笔前存快照：撤销才能回到「这一笔之前」 */
+      this.pushUndo();
       this.strokes.push(st);
       const p = this._pt(e);
       st.pts.push(p[0], p[1], p[2]);
@@ -181,7 +184,6 @@ export class InkBoard {
       const st = this._st;
       this._st = null;
       if (st.pts.length < 4) st.pts.push(st.pts[0], st.pts[1], st.pts[2] || 0.5);
-      this.pushUndo();
       this.redraw();
       if (this.onChange) this.onChange();
     };
@@ -231,8 +233,12 @@ export class InkBoard {
     const ctx = c.getContext('2d');
     ctx.fillStyle = '#ffffff';
     ctx.fillRect(0, 0, W, H);
+    /* 和屏幕上的 background-size:contain 保持一致，不把底图拉变形 */
     if (this.bg) {
-      await drawImageUrl(ctx, this.bg, 0, 0, W, H);
+      await drawImageContain(ctx, this.bg, 0, 0, W, H);
+    } else {
+      /* 纸面模板线在屏幕上是 CSS 背景，导出时要补画，否则导出图和屏幕不一致 */
+      this._paintTemplate(ctx, W, H, scale);
     }
     ctx.setTransform(scale, 0, 0, scale, 0, 0);
     for (const st of this.strokes) {
@@ -244,14 +250,46 @@ export class InkBoard {
     return c.toDataURL('image/png');
   }
 
-  thumb(maxW = 320) {
+  /** 把纸面模板（横线 / 方格 / 点阵）画进导出图；k 为相对 1414×1000 的像素缩放 */
+  _paintTemplate(ctx, W, H, k) {
+    const t = this.template;
+    if (!t || t === 'blank') return;
+    ctx.save();
+    if (t === 'lines') {
+      ctx.strokeStyle = '#e8e0d2';
+      ctx.lineWidth = k;
+      for (let y = 27.5 * k; y < H; y += 28 * k) {
+        ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
+      }
+    } else if (t === 'grid') {
+      ctx.strokeStyle = '#eee7da';
+      ctx.lineWidth = k;
+      for (let y = 0; y < H; y += 28 * k) {
+        ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
+      }
+      for (let x = 0; x < W; x += 28 * k) {
+        ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke();
+      }
+    } else if (t === 'dots') {
+      ctx.fillStyle = '#ddd3c1';
+      const r = 1.1 * k;
+      for (let y = 12 * k; y < H; y += 24 * k) {
+        for (let x = 12 * k; x < W; x += 24 * k) {
+          ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill();
+        }
+      }
+    }
+    ctx.restore();
+  }
+
+  async thumb(maxW = 320) {
     const s = maxW / PAGE_W;
     const c = document.createElement('canvas');
     c.width = maxW; c.height = Math.round(PAGE_H * s);
     const ctx = c.getContext('2d');
     ctx.fillStyle = '#fff';
     ctx.fillRect(0, 0, c.width, c.height);
-    if (this.bg) drawImageUrl(ctx, this.bg, 0, 0, c.width, c.height);
+    if (this.bg) await drawImageContain(ctx, this.bg, 0, 0, c.width, c.height);
     ctx.setTransform(s, 0, 0, s, 0, 0);
     for (const st of this.strokes) {
       const saveCtx = this.ctx;
@@ -267,6 +305,22 @@ export function drawImageUrl(ctx, url, x, y, w, h) {
   return new Promise((resolve) => {
     const img = new Image();
     img.onload = () => { ctx.drawImage(img, x, y, w, h); resolve(); };
+    img.onerror = () => resolve();
+    img.src = url;
+  });
+}
+
+/** 按 contain 方式居中画底图（等同 CSS background-size:contain），不拉伸变形 */
+export function drawImageContain(ctx, url, x, y, w, h) {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      const iw = img.naturalWidth || 1, ih = img.naturalHeight || 1;
+      const k = Math.min(w / iw, h / ih);
+      const dw = iw * k, dh = ih * k;
+      ctx.drawImage(img, x + (w - dw) / 2, y + (h - dh) / 2, dw, dh);
+      resolve();
+    };
     img.onerror = () => resolve();
     img.src = url;
   });
