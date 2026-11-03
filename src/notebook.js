@@ -1,6 +1,7 @@
 /* 笔记本：笔记库 + 编辑器 */
 import { store, uid, fmtTime } from './store.js';
 import { InkBoard, COLORS, SIZES } from './inkboard.js';
+import { buildNoteJson, parseNoteJson } from './notejson.js';
 
 const LS_LAST = 'kynb_last_note';
 
@@ -194,17 +195,60 @@ export function initNotebook() {
   };
 
   $('inkExportJson').onclick = async () => {
+    if (!st.note) return;
     await saveNow();
     const note = await store.getNote(st.note.id);
     const pages = st.pages.map((p) => ({
       no: p.no, template: p.template, bg: !!p.bg, strokes: p.strokes,
     }));
-    const blob = new Blob([JSON.stringify({ app: 'KY-notebook', version: 1, note, pages }, null, 2)], { type: 'application/json' });
+    const data = buildNoteJson(note || st.note, pages);   /* 带 v / exportedAt，导入靠它判断版本 */
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
     a.download = `${(note && note.title) || 'note'}.json`;
     a.click();
     setTimeout(() => URL.revokeObjectURL(a.href), 3000);
+  };
+
+  /* ---------- 导入 JSON：选文件 → 校验 → 新建一本笔记（不动已有笔记） ---------- */
+  const importFile = $('inkImportFile');
+  $('inkImportJson').onclick = () => { importFile.value = ''; importFile.click(); };
+
+  importFile.onchange = async () => {
+    const f = importFile.files && importFile.files[0];
+    if (!f) return;
+    let text;
+    try {
+      text = await f.text();
+    } catch (e) {
+      toast('读取文件失败：' + (e.message || e), true);
+      return;
+    }
+    const r = parseNoteJson(text);
+    if (!r.ok) { toast('导入失败：' + r.error, true); return; }
+
+    const id = uid('note');
+    const fallback = f.name.replace(/\.json$/i, '').trim() || '导入的笔记';
+    const note = {
+      id, title: r.title || fallback, kind: 'ink', star: r.star,
+      createdAt: r.createdAt, updatedAt: Date.now(), pageCount: r.pages.length, thumb: '',
+    };
+    try {
+      await store.putNote(note);
+      for (const p of r.pages) {
+        await store.putPage({
+          id: `${id}#${p.no}`, noteId: id, no: p.no,
+          template: p.template, strokes: p.strokes, bg: null,   /* JSON 里没有底图 */
+        });
+      }
+    } catch (e) {
+      /* 写了一半失败：把这本刚建的删掉，别留半成品；已有笔记不受影响 */
+      await store.delNote(id).catch(() => {});
+      toast('写入失败：' + (e.message || e), true);
+      return;
+    }
+    await renderLib();
+    toast(`已导入「${note.title}」：${note.pageCount} 页`);
   };
 
   /* ---------- 笔记库 ---------- */
@@ -270,4 +314,21 @@ export function initNotebook() {
 
 function escapeHtml(s) {
   return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+/* 轻提示：底部一条，几秒后自己淡出（导入结果 / 错误都用它） */
+let toastT = 0;
+function toast(msg, isBad) {
+  let el = document.getElementById('kynbToast');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'kynbToast';
+    document.body.appendChild(el);
+  }
+  el.textContent = msg;
+  el.className = 'toast' + (isBad ? ' bad' : '');
+  void el.offsetWidth;              /* 先落在收起态，淡入才会动 */
+  el.classList.add('on');
+  clearTimeout(toastT);
+  toastT = setTimeout(() => el.classList.remove('on'), isBad ? 4500 : 2200);
 }

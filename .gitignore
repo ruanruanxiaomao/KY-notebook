@@ -11,3 +11,6 @@ Thumbs.db
 # 依赖（本demo没有，但留着防止以后加构建）
 node_modules/
 .env
+
+# AI 编程助手的本地工作日志（不入库）
+.workbuddy/

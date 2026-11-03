@@ -35,8 +35,12 @@
     <aside class="lib">
       <div class="lib-head">
         <strong>我的笔记</strong>
-        <button class="btn mini" id="inkNew">＋ 新建</button>
+        <div class="lib-actions">
+          <button class="btn mini" id="inkImportJson" title="从导出的 JSON 文件新建一本笔记">导入 JSON</button>
+          <button class="btn mini" id="inkNew">＋ 新建</button>
+        </div>
       </div>
+      <input type="file" id="inkImportFile" accept="application/json,.json" hidden>
       <div class="lib-grid" id="inkLib"></div>
       <div class="lib-empty" id="inkEmpty">还没有笔记，点「＋ 新建」开始。</div>
     </aside>
