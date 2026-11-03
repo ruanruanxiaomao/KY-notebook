@@ -48,6 +48,8 @@ select:focus,input:focus,textarea:focus{border-color:#bfa98a;box-shadow:0 0 0 3p
 .row.wrap{flex-wrap:wrap}
 .hint{color:var(--sub);font-size:12.5px}
 .status{color:var(--sub);font-size:13px}
+.status.ok{color:#2e7d32}
+.status.bad{color:#a02020}
 .spacer-h{height:6px}
 
 /* 视图容器 */

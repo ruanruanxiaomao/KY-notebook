@@ -39,24 +39,35 @@ class Handler(SimpleHTTPRequestHandler):
     def _cors(self):
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Headers", "*")
-        self.send_header("Access-Control-Allow-Methods", "POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 
     def do_OPTIONS(self):
         self.send_response(204)
         self._cors()
         self.end_headers()
 
+    def do_GET(self):
+        if self.path.startswith("/proxy"):
+            self._proxy("GET", b"")
+            return
+        super().do_GET()
+
     def do_POST(self):
         if not self.path.startswith("/proxy"):
             self.send_error(404, "only /proxy is proxied")
             return
+        n = int(self.headers.get("Content-Length") or 0)
+        body = self.rfile.read(n) if n else b""
+        self._proxy("POST", body)
+
+    def _proxy(self, method, body):
         target = (parse_qs(urlparse(self.path).query).get("u") or [""])[0]
         if not target.startswith(("http://", "https://")):
             self._reply(400, b'{"error":{"message":"missing ?u=<url>"}}')
             return
-        n = int(self.headers.get("Content-Length") or 0)
-        body = self.rfile.read(n) if n else b""
-        req = urllib.request.Request(target, data=body, method="POST")
+        req = urllib.request.Request(
+            target, data=body if method == "POST" else None, method=method
+        )
         # 有些服务会按 UA 拦脚本请求，这里伪装成浏览器
         req.add_header(
             "User-Agent",
@@ -94,7 +105,7 @@ def main():
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 8765
     ThreadingTCPServer.allow_reuse_address = True
     with ThreadingTCPServer(("127.0.0.1", port), Handler) as srv:
-        print("KY-notebook → http://127.0.0.1:%d/   (proxy: POST /proxy?u=...)" % port)
+        print("KY-notebook → http://127.0.0.1:%d/   (proxy: GET/POST /proxy?u=...)" % port)
         print("Ctrl+C 停止")
         try:
             srv.serve_forever()

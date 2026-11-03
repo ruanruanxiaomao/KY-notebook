@@ -217,8 +217,13 @@
       <input id="cfgKey" type="password" placeholder="sk-…">
     </label>
     <label class="field">模型
-      <input id="cfgModel" placeholder="deepseek-chat">
+      <input id="cfgModel" placeholder="deepseek-chat" list="cfgModelList" autocomplete="off">
     </label>
+    <datalist id="cfgModelList"></datalist>
+    <div class="row">
+      <button class="btn ghost mini" type="button" id="cfgFetch">从接口拉取模型列表</button>
+      <span class="status" id="cfgFetchStatus"></span>
+    </div>
     <label class="check"><input type="checkbox" id="cfgVision"> 这个模型支持看图（拍题 / 图片解析需要）</label>
     <div class="row end">
       <button class="btn ghost" value="cancel">取消</button>

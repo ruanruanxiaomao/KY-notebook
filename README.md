@@ -79,6 +79,7 @@ python serve.py            # 默认 http://127.0.0.1:8765/
 | Base URL | `https://xxx/v1`、`…/v1/chat/completions`、ollama 的 `http://127.0.0.1:11434` 都行，会自动补 `/chat/completions` |
 | API Key | 本机 ollama 可以留空 |
 | 模型 | 例如 `gpt-4o-mini`、`qwen2.5-vl-7b`、`deepseek-v4.1-flash` 等 |
+| 拉取模型 | 填好 Base URL + Key 后点「从接口拉取模型列表」，模型输入框就能下拉选了（服务端没有 /models 时会提示，手填即可） |
 | 支持看图 | 拍题、图片/PDF 解析必须勾上，并且模型本身得是视觉模型 |
 
 几个坑：

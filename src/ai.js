@@ -28,6 +28,74 @@ export function cfgOk() {
   return !!(c.baseUrl && c.model);
 }
 
+/**
+ * 从接口拉模型列表（GET {base}/models）。找不到 /models 的服务会报错，让用户手填。
+ * 返回 Promise<string[]>
+ */
+export async function listModels(baseUrlIn, apiKeyIn) {
+  const c = getCfg();
+  const base = ((baseUrlIn != null ? baseUrlIn : c.baseUrl) || "").trim();
+  const key = ((apiKeyIn != null ? apiKeyIn : c.apiKey) || "").trim();
+  if (!base) throw new Error("先填 Base URL");
+
+  let u = base.replace(/\/+$/, "");
+  u = u.replace(/\/chat\/completions$/, "").replace(/\/api\/chat$/, "");
+  const url = /\/v\d+$/.test(u) ? u + "/models" : u + "/v1/models";
+
+  const headers = { Accept: "application/json" };
+  if (key) headers.Authorization = "Bearer " + key;
+  if (/opencode\.ai/i.test(url)) {
+    headers["x-opencode-session"] =
+      window.crypto && crypto.randomUUID ? crypto.randomUUID() : "kynb-" + Date.now().toString(36);
+  }
+
+  const tryGet = async (u2) => {
+    const r = await fetch(u2, { method: "GET", headers });
+    return { ok: r.ok, status: r.status, txt: await r.text() };
+  };
+  let res;
+  try {
+    res = await tryGet(url);
+  } catch (e) {
+    if (!/^https?:$/.test(location.protocol)) {
+      throw new Error("请求失败：" + (e && e.message ? e.message : e));
+    }
+    try {
+      res = await tryGet(location.origin + "/proxy?u=" + encodeURIComponent(url));
+    } catch (e2) {
+      throw new Error("拉取失败：直连被 CORS 拦、本地代理也没通（用 python serve.py 启动再试）");
+    }
+  }
+  if (!res.ok) {
+    if (res.status === 404 || res.status === 405) {
+      throw new Error("这个地址没有 /models 列表接口（" + res.status + "），模型名请手填");
+    }
+    if (res.status === 401 || res.status === 403) {
+      throw new Error("密钥被拒（" + res.status + "），检查 API Key 是否填对");
+    }
+    let detail = res.txt.slice(0, 160);
+    try {
+      const j = JSON.parse(res.txt);
+      detail = (j.error && (j.error.message || j.error.code)) || j.message || detail;
+    } catch (e) { /* 原文 */ }
+    throw new Error("拉取失败：" + res.status + " " + detail);
+  }
+
+  let j;
+  try { j = JSON.parse(res.txt); } catch (e) {
+    throw new Error("返回的不是 JSON：" + res.txt.slice(0, 120));
+  }
+  const arr = Array.isArray(j.data) ? j.data : Array.isArray(j.models) ? j.models : [];
+  const ids = [];
+  for (const x of arr) {
+    const id = typeof x === "string" ? x : x && (x.id || x.name || x.model);
+    if (id && typeof id === "string") ids.push(id);
+  }
+  const uniq = [...new Set(ids)];
+  if (!uniq.length) throw new Error("接口有响应，但没认出模型列表格式（既没有 data[] 也没有 models[]）");
+  return uniq;
+}
+
 function endpointOf(baseUrl) {
   let u = baseUrl.replace(/\/+$/, '');
   if (/\/chat\/completions$/.test(u)) return u;

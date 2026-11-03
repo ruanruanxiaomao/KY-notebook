@@ -2,7 +2,7 @@
 import { initNotebook } from './notebook.js';
 import { initShot } from './shot.js';
 import { initAnnot } from './annot.js';
-import { getCfg, setCfg } from './ai.js';
+import { getCfg, setCfg, listModels } from './ai.js';
 import { getPrompts, setPrompts, resetPrompts, DEFAULT_PROMPTS } from './prompts.js';
 
 const $ = (id) => document.getElementById(id);
@@ -36,7 +36,10 @@ $('btnSettings').onclick = () => {
   $('cfgKey').value = c.apiKey || '';
   $('cfgModel').value = c.model || '';
   $('cfgVision').checked = !!c.vision;
+  $('cfgModelList').innerHTML = '';
+  $('cfgFetchStatus').textContent = '';
   dlgSettings.showModal();
+  if (c.baseUrl && c.apiKey && !c.model) fetchModels(true);
 };
 $('cfgSave').onclick = () => {
   setCfg({
@@ -46,6 +49,34 @@ $('cfgSave').onclick = () => {
     vision: $('cfgVision').checked,
   });
 };
+
+/* 从接口拉模型列表：填进 datalist，输入框可直接下拉选 */
+async function fetchModels(auto) {
+  const st = $('cfgFetchStatus');
+  const dl = $('cfgModelList');
+  const base = $('cfgBase').value.trim();
+  const key = $('cfgKey').value.trim();
+  if (!base) { st.className = 'status bad'; st.textContent = '先填 Base URL'; return; }
+  st.className = 'status';
+  st.textContent = '正在拉取模型列表…';
+  try {
+    const ids = await listModels(base, key);
+    dl.innerHTML = '';
+    ids.forEach((id) => {
+      const o = document.createElement('option');
+      o.value = id;
+      dl.appendChild(o);
+    });
+    st.className = 'status ok';
+    st.textContent = `拿到 ${ids.length} 个模型，点「模型」输入框可下拉选`;
+    if (ids.length === 1 && !$('cfgModel').value.trim()) $('cfgModel').value = ids[0];
+  } catch (e) {
+    st.className = 'status bad';
+    st.textContent = e && e.message ? e.message : String(e);
+  }
+}
+
+$('cfgFetch').onclick = () => fetchModels(false);
 
 /* ---------- 提示词 ---------- */
 const dlgPrompts = $('dlgPrompts');
