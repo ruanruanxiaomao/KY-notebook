@@ -5,6 +5,10 @@ import { buildNoteJson, parseNoteJson } from './notejson.js';
 
 const LS_LAST = 'kynb_last_note';
 
+/* initNotebook() 之后把一份 API 挂在这里，annot.js 存笔记时用，不必再经 main.js 传一圈 */
+let noteApi = null;
+export function noteSink() { return noteApi; }
+
 export function initNotebook() {
   const $ = (id) => document.getElementById(id);
   const libEl = $('inkLib');
@@ -14,6 +18,7 @@ export function initNotebook() {
   const pageInfo = $('inkPageInfo');
   const tplSel = $('inkTemplate');
   const starBtn = $('inkStar');
+  const srcBar = $('inkSrcBar');
 
   const board = new InkBoard($('inkCv'), $('inkPaper'), $('inkStage'));
   const st = { note: null, pages: [], idx: 0, tool: 'pen', color: COLORS[0], size: SIZES[1], saveT: 0 };
@@ -118,6 +123,20 @@ export function initNotebook() {
   };
 
   /* ---------- 打开 / 新建 / 删除 ---------- */
+  /* 来源行：从 PDF / 图片批注、拍题存下来的笔记显示一行「来源：…」，点它回对应标签页 */
+  function renderSrc(src) {
+    if (!src || !src.kind) { srcBar.hidden = true; srcBar.innerHTML = ''; return; }
+    const label = src.kind === 'shot' ? '拍题' : (src.name || '未命名');
+    srcBar.innerHTML = `来源：<span class="nm" title="${escapeHtml(srcFull(src))}">${srcIcon(src)} ${escapeHtml(label)}</span>`
+      + (src.page ? `（第 ${src.page} 页）` : '')
+      + `<button id="inkSrcGo">${src.kind === 'pdf' ? '回到 PDF 批注' : src.kind === 'img' ? '回到图片批注' : '回到拍题'}</button>`;
+    srcBar.hidden = false;
+    srcBar.querySelector('#inkSrcGo').onclick = () => {
+      const tab = document.querySelector(`.tab[data-tab="${src.kind === 'shot' ? 'shot' : 'annot'}"]`);
+      if (tab) tab.click();
+    };
+  }
+
   async function openNote(id) {
     const n = await store.getNote(id);
     if (!n) return;
@@ -136,6 +155,7 @@ export function initNotebook() {
     const view = libEl.closest('.view-ink') || libEl.closest('.view');
     if (view) view.classList.add('editing');
     tplSel.value = st.pages[0].template;
+    renderSrc(n.src || null);
     loadPage(0);
     requestAnimationFrame(() => board.layout());
     localStorage.setItem(LS_LAST, id);
@@ -143,10 +163,14 @@ export function initNotebook() {
 
   async function closeNote() {
     /* 先等这一页存完再清状态：saveNow 后半段还要写 note.thumb / updatedAt */
+    const opened = st.note;
     await saveNow();
+    /* 等保存的这段时间里用户又点开了笔记：别把它的状态清掉（否则 pages 会被清空） */
+    if (st.note !== opened) return;
     st.note = null;
     st.pages = [];
     edEl.hidden = true;
+    renderSrc(null);
     libEl.parentElement.style.display = '';
     const view = libEl.closest('.view-ink') || libEl.closest('.view');
     if (view) view.classList.remove('editing');
@@ -194,21 +218,37 @@ export function initNotebook() {
     a.click();
   };
 
-  $('inkExportJson').onclick = async () => {
+  /* ---------- 导出 JSON（可选带底图） ---------- */
+  const expDlg = $('dlgExportJson');
+  const expBg = $('expWithBg');
+
+  $('inkExportJson').onclick = () => {
     if (!st.note) return;
+    expDlg.returnValue = '';
+    expDlg.showModal();
+  };
+
+  expDlg.addEventListener('close', async () => {
+    if (expDlg.returnValue !== 'go' || !st.note) return;
+    const withBg = !!expBg.checked;
     await saveNow();
     const note = await store.getNote(st.note.id);
-    const pages = st.pages.map((p) => ({
-      no: p.no, template: p.template, bg: !!p.bg, strokes: p.strokes,
-    }));
-    const data = buildNoteJson(note || st.note, pages);   /* 带 v / exportedAt，导入靠它判断版本 */
+    const pages = [];
+    let bgN = 0;
+    for (const p of st.pages) {
+      let bg = false;
+      if (withBg && p.bg) { bg = await shrinkBgDataUrl(p.bg); bgN++; }
+      pages.push({ no: p.no, template: p.template, bg, strokes: p.strokes });
+    }
+    const data = buildNoteJson(note || st.note, pages);   /* 带 v / exportedAt / src，导入靠它判断版本 */
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
     a.download = `${(note && note.title) || 'note'}.json`;
     a.click();
     setTimeout(() => URL.revokeObjectURL(a.href), 3000);
-  };
+    toast(withBg ? `已导出 JSON（含 ${bgN} 页底图）` : '已导出 JSON（不含底图）');
+  });
 
   /* ---------- 导入 JSON：选文件 → 校验 → 新建一本笔记（不动已有笔记） ---------- */
   const importFile = $('inkImportFile');
@@ -233,12 +273,15 @@ export function initNotebook() {
       id, title: r.title || fallback, kind: 'ink', star: r.star,
       createdAt: r.createdAt, updatedAt: Date.now(), pageCount: r.pages.length, thumb: '',
     };
+    if (r.src) note.src = r.src;
+    let bgN = 0;
     try {
       await store.putNote(note);
       for (const p of r.pages) {
+        if (p.bg) bgN++;
         await store.putPage({
           id: `${id}#${p.no}`, noteId: id, no: p.no,
-          template: p.template, strokes: p.strokes, bg: null,   /* JSON 里没有底图 */
+          template: p.template, strokes: p.strokes, bg: p.bg || null,
         });
       }
     } catch (e) {
@@ -248,7 +291,7 @@ export function initNotebook() {
       return;
     }
     await renderLib();
-    toast(`已导入「${note.title}」：${note.pageCount} 页`);
+    toast(`已导入「${note.title}」：${note.pageCount} 页` + (bgN ? ` · 已恢复 ${bgN} 页底图` : ''));
   };
 
   /* ---------- 笔记库 ---------- */
@@ -265,6 +308,7 @@ export function initNotebook() {
           <div class="name">${escapeHtml(n.title || '未命名笔记')}</div>
           <div class="sub">${n.pageCount || 1} 页 · ${fmtTime(n.updatedAt)}</div>
         </div>
+        ${n.src && n.src.kind ? `<div class="src" title="${escapeHtml(srcFull(n.src))}">${escapeHtml(srcBadge(n.src))}</div>` : ''}
         ${n.star ? '<div class="star">★</div>' : ''}
         <button class="x" title="删除">✕</button>`;
       c.onclick = (e) => {
@@ -283,33 +327,85 @@ export function initNotebook() {
 
   renderLib();
 
-  return {
-    renderLib,
-    newNote,
-    openNote,
-    board,
-    state: st,
-    /* 拍题「存为笔记底图」用 */
-    async addBgPage(dataUrl, title) {
-      if (st.note) {
-        await saveNow();
-        st.pages.push({ no: st.pages.length, template: 'blank', strokes: [], bg: dataUrl });
-        titleEl.value = titleEl.value || title;
-        loadPage(st.pages.length - 1);
-        saveSoon(true);
-        return st.note.id;
+  /* 拍题 / 批注页「存为笔记」：把一张底图存成一页，并记下来源 */
+  async function addBgPage(dataUrl, title, src, strokes) {
+    const from = src || { kind: 'shot', name: title || '拍题', page: 1 };
+    const ink = Array.isArray(strokes) ? strokes : [];
+    if (st.note) {
+      await saveNow();
+      st.pages.push({ no: st.pages.length, template: 'blank', strokes: ink, bg: dataUrl });
+      if (!st.note.src) st.note.src = from;
+      titleEl.value = titleEl.value || title;
+      loadPage(st.pages.length - 1);
+      saveSoon(true);
+      return st.note.id;
+    }
+    const id = uid('note');
+    const note = {
+      id, title: title || '拍题笔记', kind: from.kind === 'shot' ? 'shot' : 'ink', star: 0, src: from,
+      createdAt: Date.now(), updatedAt: Date.now(), pageCount: 1, thumb: '',
+    };
+    await store.putNote(note);
+    await store.putPage({ id: `${id}#0`, noteId: id, no: 0, template: 'blank', strokes: ink, bg: dataUrl });
+    await openNote(id);
+    return id;
+  }
+
+  const api = { renderLib, newNote, openNote, board, state: st, addBgPage, toast };
+  noteApi = api;
+  return api;
+}
+
+const SRC_ICON = { pdf: '📄', img: '🖼', shot: '📷' };
+const srcIcon = (s) => SRC_ICON[s && s.kind] || '📄';
+
+/** 卡片徽标：📄 文件名 p3 / 🖼 图片名 / 📷 拍题 */
+function srcBadge(src) {
+  if (!src || !src.kind) return '';
+  if (src.kind === 'shot') return '📷 拍题';
+  const name = src.name || '未命名';
+  return `${srcIcon(src)} ${name}${src.page ? ' p' + src.page : ''}`;
+}
+
+/** 悬停 title：全名 + 页码 */
+function srcFull(src) {
+  if (!src || !src.kind) return '';
+  if (src.kind === 'shot') return '拍题';
+  return `${src.name || '未命名'}${src.page ? ` 第 ${src.page} 页` : ''}`;
+}
+
+/** 底图压到长边 ≤1400、JPEG q0.7；单页 >250 KB 再降一档（0.55 → 0.4） */
+function shrinkBgDataUrl(dataUrl) {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const MAX = 1400;
+        const LIMIT = 250 * 1024;
+        const iw = img.naturalWidth || 1;
+        const ih = img.naturalHeight || 1;
+        const k = Math.min(1, MAX / Math.max(iw, ih));
+        const c = document.createElement('canvas');
+        c.width = Math.max(1, Math.round(iw * k));
+        c.height = Math.max(1, Math.round(ih * k));
+        const ctx = c.getContext('2d');
+        ctx.fillStyle = '#fff';
+        ctx.fillRect(0, 0, c.width, c.height);
+        ctx.drawImage(img, 0, 0, c.width, c.height);
+        let q = 0.7;
+        let out = c.toDataURL('image/jpeg', q);
+        while (out.length * 0.75 > LIMIT && q > 0.35) {   /* base64 长度 × 0.75 ≈ 字节数 */
+          q = Math.round((q - 0.15) * 100) / 100;
+          out = c.toDataURL('image/jpeg', q);
+        }
+        resolve(out);
+      } catch (e) {
+        resolve(dataUrl);
       }
-      const id = uid('note');
-      const note = {
-        id, title: title || '拍题笔记', kind: 'shot', star: 0,
-        createdAt: Date.now(), updatedAt: Date.now(), pageCount: 1, thumb: '',
-      };
-      await store.putNote(note);
-      await store.putPage({ id: `${id}#0`, noteId: id, no: 0, template: 'blank', strokes: [], bg: dataUrl });
-      await openNote(id);
-      return id;
-    },
-  };
+    };
+    img.onerror = () => resolve(dataUrl);
+    img.src = dataUrl;
+  });
 }
 
 function escapeHtml(s) {

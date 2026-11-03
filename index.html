@@ -55,6 +55,8 @@
         <button class="btn mini danger" id="inkDel" title="删除这本笔记">🗑</button>
       </div>
 
+      <div class="srcbar" id="inkSrcBar" hidden></div>
+
       <div class="tools">
         <div class="group">
           <button class="tool on" data-tool="pen" title="笔">✏️</button>
@@ -164,6 +166,7 @@
       <div class="row tight wrap">
         <button class="btn mini" id="annotExportPng">导出本页 PNG</button>
         <button class="btn mini" id="annotExportJson">导出批注 JSON</button>
+        <button class="btn mini" id="annotToNote" title="把当前页（含笔迹）存进笔记本，带上来源">存为笔记</button>
       </div>
       <div class="out small" id="annotOut"><div class="ph">AI 结果会出现在这里。</div></div>
     </div>
@@ -172,12 +175,35 @@
       <div class="stage" id="annotStage">
         <div class="paper" id="annotPaper">
           <canvas id="annotBg"></canvas>
+          <div class="ann-hl" id="annotHl" hidden></div>
           <canvas id="annotCv"></canvas>
         </div>
       </div>
     </div>
+
+    <div class="pane text-pane">
+      <div class="pane-head">
+        <strong>本页文字</strong>
+        <span class="hint" id="annotTextCount"></span>
+      </div>
+      <div class="ann-text" id="annotText"><div class="ph">导入 PDF 后，这里会显示本页文字。</div></div>
+    </div>
   </section>
 </main>
+
+<!-- ============ 导出 JSON ============ -->
+<dialog id="dlgExportJson" class="dlg">
+  <form method="dialog" class="dlg-body">
+    <h3>导出 JSON</h3>
+    <p class="hint">结构：<code>{ app, v, exportedAt, note, pages }</code>，可以在笔记库里「导入 JSON」读回来。</p>
+    <label class="check"><input type="checkbox" id="expWithBg"> 包含页面底图（文件会变大）</label>
+    <p class="hint">底图会压到长边 ≤1400、JPEG q0.7；单页超过 250 KB 再降一档质量。</p>
+    <div class="row end">
+      <button class="btn ghost" value="cancel">取消</button>
+      <button class="btn primary" id="expGo" value="go">导出</button>
+    </div>
+  </form>
+</dialog>
 
 <!-- ============ 设置 ============ -->
 <dialog id="dlgSettings" class="dlg">

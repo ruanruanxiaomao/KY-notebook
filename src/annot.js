@@ -1,13 +1,20 @@
-/* 图片 / PDF 批注：导入 → 在页面上写字 → 导出 / 让 AI 解析本页 */
-import { InkBoard, imageToDataUrl, loadImageFile } from './inkboard.js';
+/* 图片 / PDF 批注：导入 → 在页面上写字 → 导出 / 让 AI 解析本页
+   M2 新增：
+   - PDF 文字层：page.getTextContent() 抽字，按 y 聚行、按行距聚段，点段落 → 原页对应位置画高亮矩形
+   - 每段可「AI 解析这段」「翻译这段」（复用 prompts.js + ai.js）
+   - 「存为笔记」把当前页（含笔迹）存进笔记本，并带上来源 note.src
+*/
+import { InkBoard, PAGE_W, PAGE_H, imageToDataUrl, loadImageFile } from './inkboard.js';
 import { chat, cfgOk } from './ai.js';
 import { getPrompts, composePrompt, promptById } from './prompts.js';
 import { mdInto, tidyAI } from './md.js';
+import { noteSink } from './notebook.js';
 
 export function initAnnot() {
   const $ = (id) => document.getElementById(id);
   const board = new InkBoard($('annotCv'), $('annotPaper'), $('annotStage'));
-  const st = { pages: [], idx: 0, zoom: 1, kind: '' };
+  const hl = $('annotHl');
+  const st = { pages: [], idx: 0, zoom: 1, kind: '', name: '', sel: -1 };
   $('annotBg').hidden = true;
 
   board.onChange = () => { if (st.pages[st.idx]) st.pages[st.idx].strokes = board.getStrokes(); };
@@ -31,10 +38,11 @@ export function initAnnot() {
   window.__kynbFillAnnotPrompts = fillPrompts;
 
   /* ---------- 载入 ---------- */
-  function setPages(pages, kind) {
+  function setPages(pages, kind, name) {
     st.pages = pages;
     st.idx = 0;
     st.kind = kind;
+    st.name = name || '';
     showPage(0);
   }
 
@@ -47,12 +55,18 @@ export function initAnnot() {
     board.zoom = st.zoom;
     board.layout();
     $('annotPageInfo').textContent = `${st.idx + 1} / ${st.pages.length}`;
+    st.sel = -1;
+    hl.hidden = true;
+    renderText();
   }
 
   async function pickImage(file) {
     try {
       const img = await loadImageFile(file);
-      setPages([{ bg: imageToDataUrl(img, 1800, 0.88), strokes: [] }], 'image');
+      setPages([{
+        bg: imageToDataUrl(img, 1800, 0.88), strokes: [],
+        iw: img.naturalWidth, ih: img.naturalHeight, paras: [], chars: 0,
+      }], 'image', file.name);
       $('annotStatus').textContent = '已载入图片，可以直接写';
     } catch (e) { $('annotStatus').textContent = e.message || String(e); }
   }
@@ -66,6 +80,7 @@ export function initAnnot() {
       lib.GlobalWorkerOptions.workerSrc = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.worker.min.js';
       const pdf = await lib.getDocument({ data: new Uint8Array(buf) }).promise;
       const pages = [];
+      let withText = 0;
       for (let i = 1; i <= pdf.numPages; i++) {
         const page = await pdf.getPage(i);
         const vp0 = page.getViewport({ scale: 1 });
@@ -78,11 +93,26 @@ export function initAnnot() {
         ctx.fillStyle = '#fff';
         ctx.fillRect(0, 0, c.width, c.height);
         await page.render({ canvasContext: ctx, viewport: vp }).promise;
-        pages.push({ bg: c.toDataURL('image/jpeg', 0.85), strokes: [] });
+
+        /* 文字层：抽不出来（扫描件）也不报错，按空处理 */
+        let paras = [];
+        let chars = 0;
+        try {
+          const tc = await page.getTextContent();
+          const r = itemsToParas(tc.items || [], vp0);
+          paras = r.paras;
+          chars = r.chars;
+          if (chars >= 50) withText++;
+        } catch (e) { /* 没有文字层就当扫描件 */ }
+
+        pages.push({
+          bg: c.toDataURL('image/jpeg', 0.85), strokes: [],
+          iw: vp.width, ih: vp.height, paras, chars,
+        });
         $('annotStatus').textContent = `正在解析 PDF… ${i}/${pdf.numPages}`;
       }
-      setPages(pages, 'pdf');
-      $('annotStatus').textContent = `已载入 ${pages.length} 页，可以直接写`;
+      setPages(pages, 'pdf', file.name);
+      $('annotStatus').textContent = `已载入 ${pages.length} 页（${withText} 页有文字层），可以直接写`;
     } catch (e) {
       $('annotStatus').textContent = 'PDF 打开失败：' + (e.message || e);
     }
@@ -98,6 +128,115 @@ export function initAnnot() {
   $('annotNext').onclick = () => { if (st.idx < st.pages.length - 1) showPage(st.idx + 1); };
   $('annotZoomIn').onclick = () => { st.zoom = Math.min(3, st.zoom + 0.15); board.setZoom(st.zoom); $('annotZoomInfo').textContent = Math.round(st.zoom * 100) + '%'; };
   $('annotZoomOut').onclick = () => { st.zoom = Math.max(0.4, st.zoom - 0.15); board.setZoom(st.zoom); $('annotZoomInfo').textContent = Math.round(st.zoom * 100) + '%'; };
+
+  /* ---------- 本页文字 ---------- */
+  function renderText() {
+    const box = $('annotText');
+    const cnt = $('annotTextCount');
+    const p = st.pages[st.idx];
+    box.innerHTML = '';
+    cnt.textContent = '';
+    if (!p) {
+      box.innerHTML = '<div class="ph">导入 PDF 后，这里会显示本页文字。</div>';
+      return;
+    }
+    if (st.kind !== 'pdf') {
+      box.innerHTML = '<div class="ann-note">图片没有文字层，可以只用笔迹批注。</div>';
+      return;
+    }
+    if (!p.paras || !p.paras.length || (p.chars || 0) < 50) {
+      box.innerHTML = '<div class="ann-note">这一页没有文字层（扫描件），可以只用笔迹批注。</div>';
+      return;
+    }
+    cnt.textContent = `${p.paras.length} 段 · ${p.chars} 字`;
+    p.paras.forEach((para, i) => {
+      const d = document.createElement('div');
+      d.className = 'ann-para';
+      d.dataset.i = String(i);
+      const head = document.createElement('div');
+      head.className = 'ann-head';
+      const t = document.createElement('div');
+      t.className = 'txt';
+      t.textContent = para.text;
+      const acts = document.createElement('div');
+      acts.className = 'ann-acts';
+      acts.innerHTML = '<button class="btn mini" data-act="ai">AI 解析这段</button>'
+        + '<button class="btn mini" data-act="trans">翻译这段</button>';
+      head.append(t, acts);
+      const out = document.createElement('div');
+      out.className = 'ann-out';
+      out.hidden = true;
+      d.append(head, out);
+      d.onclick = (e) => { if (!e.target.closest('.ann-acts')) pickPara(i); };
+      acts.querySelector('[data-act="ai"]').onclick = (e) => { e.stopPropagation(); runParaAI(i, 'ai', d); };
+      acts.querySelector('[data-act="trans"]').onclick = (e) => { e.stopPropagation(); runParaAI(i, 'trans', d); };
+      box.appendChild(d);
+    });
+  }
+
+  /** 点段落 → 在纸面上盖一个半透明矩形（纸面按 contain 铺底，先算 contain 的偏移与缩放） */
+  function pickPara(i) {
+    const p = st.pages[st.idx];
+    if (!p || !p.paras || !p.paras[i]) return;
+    st.sel = i;
+    document.querySelectorAll('#annotText .ann-para').forEach((el) => {
+      el.classList.toggle('on', Number(el.dataset.i) === i);
+    });
+    const b = p.paras[i].box;
+    const iw = p.iw || PAGE_W;
+    const ih = p.ih || PAGE_H;
+    const k = Math.min(PAGE_W / iw, PAGE_H / ih);
+    const dw = iw * k;
+    const dh = ih * k;
+    const ox = (PAGE_W - dw) / 2;
+    const oy = (PAGE_H - dh) / 2;
+    hl.style.left = ((ox + b.x * dw) / PAGE_W * 100) + '%';
+    hl.style.top = ((oy + b.y * dh) / PAGE_H * 100) + '%';
+    hl.style.width = Math.max(0.8, (b.w * dw) / PAGE_W * 100) + '%';
+    hl.style.height = Math.max(1.4, (b.h * dh) / PAGE_H * 100) + '%';
+    hl.hidden = false;
+  }
+
+  /** 翻译用哪条提示词：优先内置「整页翻译」，用户删了就找名字带「译」的 */
+  function transPreset() {
+    const list = getPrompts();
+    return list.find((p) => p.id === 'p_trans')
+      || list.find((p) => /译/.test(p.name || ''))
+      || { name: '翻译', system: '', body: '' };
+  }
+
+  async function runParaAI(i, mode, card) {
+    const p = st.pages[st.idx];
+    const para = p && p.paras && p.paras[i];
+    if (!para) return;
+    const out = card.querySelector('.ann-out');
+    out.hidden = false;
+    if (!cfgOk()) { out.innerHTML = '<div class="ph">还没配置 AI 接口（右上角「设置」）</div>'; return; }
+
+    const preset = mode === 'trans'
+      ? transPreset()
+      : (promptById($('annotPrompt').value) || getPrompts()[0] || {});
+    const prompt = mode === 'trans'
+      ? `把下面这段文字翻译成简体中文，公式与变量保留原样，只输出译文：\n\n${para.text}`
+      : composePrompt(preset, `只处理下面这一段文字，不要重复整页内容：\n\n${para.text}`);
+
+    const btns = card.querySelectorAll('.ann-acts .btn');
+    btns.forEach((b) => { b.disabled = true; });
+    out.innerHTML = `<div class="ph">${mode === 'trans' ? '翻译中…' : '解析中…'}</div>`;
+    try {
+      const text = await chat({
+        system: preset.system || '你是一个严谨的助手，只根据给定文字作答。',
+        prompt,
+        temperature: 0.2,
+        maxTokens: 1500,
+      });
+      await mdInto(out, tidyAI(text));
+    } catch (e) {
+      out.innerHTML = `<div class="ph">出错了：${escapeHtml(e.message || e)}</div>`;
+    } finally {
+      btns.forEach((b) => { b.disabled = false; });
+    }
+  }
 
   /* ---------- AI 解析本页 ---------- */
   $('annotAsk').onclick = async () => {
@@ -152,9 +291,112 @@ export function initAnnot() {
     setTimeout(() => URL.revokeObjectURL(a.href), 3000);
   };
 
+  /* ---------- 存为笔记（带来源锚定） ---------- */
+  $('annotToNote').onclick = async () => {
+    if (!st.pages.length) { $('annotStatus').textContent = '先导入图片或 PDF'; return; }
+    const p = st.pages[st.idx];
+    p.strokes = board.getStrokes();
+    const sink = noteSink();
+    if (!sink) { $('annotStatus').textContent = '笔记本还没准备好'; return; }
+    const kind = st.kind === 'pdf' ? 'pdf' : 'img';
+    const name = st.name || (kind === 'pdf' ? 'PDF' : '图片');
+    const page = st.idx + 1;
+    const base = name.replace(/\.[^.]+$/, '') || (kind === 'pdf' ? 'PDF 批注' : '图片批注');
+    const title = st.pages.length > 1 ? `${base} p${page}` : base;
+    await sink.addBgPage(p.bg, title, { kind, name, page }, p.strokes);
+    document.querySelector('.tab[data-tab="ink"]').click();
+    if (sink.toast) sink.toast(`已存为笔记「${title}」`);
+    $('annotStatus').textContent = '已存进笔记本（带来源）';
+  };
+
   window.addEventListener('resize', () => board.layout());
 
-  return { fillPrompts };
+  return { fillPrompts, state: st };
+}
+
+/* ---------- PDF 文字层：text item → 段落（坐标归一化到 0..1，跟渲染比例无关） ---------- */
+
+/** 估算字号：pdf.js 的 transform = [a,b,c,d,e,f]，字号 ≈ √(b²+d²) */
+function fontHeight(it, tr) {
+  const h = Math.abs(it.height || 0);
+  if (h > 0.5) return h;
+  const guess = Math.hypot(tr[2] || 0, tr[3] || 0);
+  return guess > 0.5 ? guess : 10;
+}
+
+/** items: page.getTextContent().items；vp0: page.getViewport({scale:1}) */
+export function itemsToParas(items, vp0) {
+  const W = vp0.width || 1;
+  const H = vp0.height || 1;
+  const raw = [];
+  items.forEach((it) => {
+    const s = it.str || '';
+    if (!s.trim()) return;
+    const tr = it.transform || [1, 0, 0, 1, 0, 0];
+    const h = fontHeight(it, tr);
+    const x = tr[4];
+    const yTop = H - tr[5] - h;                       /* PDF 原点在左下，换成左上 */
+    const w = it.width || (s.trim().length * h * 0.5);
+    raw.push({ s, x: x / W, y: Math.max(0, yTop / H), w: Math.max(0, w) / W, h: h / H });
+  });
+  if (!raw.length) return { paras: [], chars: 0 };
+
+  /* 1) 按 y 聚行 */
+  raw.sort((a, b) => a.y - b.y || a.x - b.x);
+  const lines = [];
+  raw.forEach((it) => {
+    const last = lines[lines.length - 1];
+    if (last && Math.abs(it.y - last.y) <= Math.max(last.h, it.h) * 0.6) {
+      last.items.push(it);
+      last.y = Math.min(last.y, it.y);
+      last.h = Math.max(last.h, it.h);
+    } else {
+      lines.push({ y: it.y, h: it.h, items: [it] });
+    }
+  });
+
+  /* 2) 行内按 x 拼字；行距超过 1.9 倍行高就换段 */
+  const paras = [];
+  let cur = null;
+  let prevTop = 0;
+  let prevH = 0;
+  lines.forEach((ln) => {
+    ln.items.sort((a, b) => a.x - b.x);
+    let text = '';
+    let prevEnd = null;
+    ln.items.forEach((it) => {
+      if (prevEnd !== null && it.x - prevEnd > Math.max(0.008, it.h * 0.3)) text += ' ';
+      text += it.s;
+      prevEnd = it.x + it.w;
+    });
+    text = text.replace(/\s+/g, ' ').trim();
+    if (!text) return;
+    const x0 = Math.min(...ln.items.map((i) => i.x));
+    const x1 = Math.max(...ln.items.map((i) => i.x + i.w));
+    const row = { text, x0, x1, top: ln.y, bottom: ln.y + ln.h, h: ln.h };
+    if (cur && (row.top - prevTop) <= Math.max(row.h, prevH) * 1.9) {
+      cur.lines.push(row);
+    } else {
+      cur = { lines: [row] };
+      paras.push(cur);
+    }
+    prevTop = row.top;
+    prevH = row.h;
+  });
+
+  const out = paras.map((p) => {
+    const y0 = Math.min(...p.lines.map((l) => l.top));
+    const y1 = Math.max(...p.lines.map((l) => l.bottom));
+    const x0 = Math.min(...p.lines.map((l) => l.x0));
+    const x1 = Math.max(...p.lines.map((l) => l.x1));
+    return {
+      text: p.lines.map((l) => l.text).join(' ').replace(/\s+/g, ' ').trim(),
+      box: { x: x0, y: y0, w: Math.max(0.002, x1 - x0), h: Math.max(0.004, y1 - y0) },
+    };
+  }).filter((p) => p.text);
+
+  const chars = out.reduce((n, p) => n + p.text.length, 0);
+  return { paras: out, chars };
 }
 
 function escapeHtml(s) {

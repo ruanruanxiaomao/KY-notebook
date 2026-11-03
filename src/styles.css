@@ -57,7 +57,7 @@ main{height:calc(100% - 54px)}
 #view-ink{grid-template-columns:266px minmax(0,1fr)}
 #view-ink.editing{grid-template-columns:minmax(0,1fr)}
 #view-shot{grid-template-columns:minmax(320px,420px) minmax(0,1fr)}
-#view-annot{grid-template-columns:minmax(320px,400px) minmax(0,1fr)}
+#view-annot{grid-template-columns:minmax(300px,360px) minmax(0,1fr) minmax(260px,330px)}
 
 /* 笔记库 */
 .lib{background:var(--paper);border:1px solid var(--line);border-radius:var(--r);
@@ -78,6 +78,11 @@ main{height:calc(100% - 54px)}
 .card .x{position:absolute;right:4px;top:3px;border:0;background:rgba(0,0,0,.55);color:#fff;
   width:19px;height:19px;border-radius:50%;cursor:pointer;font-size:11px;line-height:1;display:none}
 .card:hover .x{display:block}
+/* 来源徽标：📄 文件名 p3 / 🖼 图片名 / 📷 拍题 */
+.card .src{position:absolute;left:5px;top:52px;max-width:calc(100% - 10px);
+  font-size:10.5px;line-height:1.5;color:var(--sub);background:rgba(255,255,255,.9);
+  border:1px solid #e6dcc9;border-radius:6px;padding:0 4px;white-space:nowrap;overflow:hidden;
+  text-overflow:ellipsis;pointer-events:none}
 
 /* 编辑器 */
 .editor{display:flex;flex-direction:column;background:var(--paper);border:1px solid var(--line);
@@ -86,6 +91,13 @@ main{height:calc(100% - 54px)}
 .ed-head{display:flex;align-items:center;gap:8px;padding:8px 10px;border-bottom:1px solid var(--line)}
 .title{flex:1;border:1px solid transparent;background:transparent;font-weight:600;font-size:15px}
 .title:hover{border-color:var(--line)}
+/* 笔记来源（从 PDF / 图片批注页存下来的那本） */
+.srcbar{display:flex;align-items:center;gap:6px;padding:4px 10px;border-bottom:1px solid var(--line);
+  background:#fffdf8;font-size:12.5px;color:var(--sub)}
+.srcbar[hidden]{display:none}
+.srcbar .nm{color:var(--ink);max-width:46%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.srcbar button{border:0;background:transparent;color:var(--accent);font:inherit;cursor:pointer;padding:0 2px}
+.srcbar button:hover{text-decoration:underline}
 .tools{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:8px 10px;border-bottom:1px solid var(--line)}
 .tools .group{display:flex;gap:4px;align-items:center;background:#fff;border:1px solid var(--line);
   border-radius:10px;padding:3px}
@@ -154,6 +166,27 @@ main{height:calc(100% - 54px)}
 #annotPaper{box-shadow:0 2px 12px rgba(60,45,25,.16)}
 #annotPaper canvas{position:absolute;left:0;top:0;width:100%;height:100%}
 #annotBg{position:relative!important;height:auto!important}
+/* 文字层：点段落时在 PDF 页上盖一个半透明矩形（百分比定位，跟着纸面缩放） */
+.ann-hl{position:absolute;background:rgba(139,47,47,.16);border:1px solid rgba(139,47,47,.45);
+  border-radius:2px;pointer-events:none;z-index:1}
+.ann-hl[hidden]{display:none}
+
+/* 本页文字栏 */
+.text-pane{padding:12px 10px 12px 12px}
+.ann-text{flex:1;overflow:auto;background:#fff;border:1px solid var(--line);border-radius:10px;
+  padding:8px;font-size:13.5px;line-height:1.55;user-select:text}
+.ann-text .ph,.ann-text .ann-note{color:var(--sub);font-size:13px;padding:8px 6px}
+.ann-para{padding:6px 8px;border-radius:8px;border:1px solid transparent;cursor:pointer}
+.ann-para:hover{background:#fdfaf3}
+.ann-para.on{background:var(--accent-soft);border-color:rgba(139,47,47,.25)}
+.ann-head{display:flex;gap:6px;align-items:flex-start}
+.ann-head .txt{flex:1;min-width:0;white-space:pre-wrap;word-break:break-word}
+.ann-acts{display:flex;flex-direction:column;gap:4px;flex:0 0 auto;opacity:.5;transition:.12s}
+.ann-para:hover .ann-acts,.ann-para.on .ann-acts{opacity:1}
+.ann-acts .btn{padding:2px 6px;font-size:11.5px}
+.ann-out{margin-top:6px;padding-top:6px;border-top:1px dashed #e7ddcb;font-size:13px}
+.ann-out .ph{color:var(--sub);font-size:12.5px}
+.ann-out p{margin:5px 0}
 
 /* 对话框 */
 .dlg{border:0;border-radius:14px;padding:0;box-shadow:0 18px 50px rgba(40,30,15,.28);
@@ -185,5 +218,6 @@ main{height:calc(100% - 54px)}
   #view-shot .pane.right{min-height:40vh}
   #view-shot .pane.right .out{max-height:70vh}
   .annot-stage-wrap .stage{height:64vh}
+  .text-pane{max-height:60vh}
   .notice{left:8px;right:8px;transform:none;max-width:none}
 }

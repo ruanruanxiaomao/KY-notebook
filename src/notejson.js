@@ -1,17 +1,31 @@
 /* 手写笔记 JSON 的读写（纯数据层：不碰 DOM，也不碰 IndexedDB）
-   结构：{ app:'KY-notebook', v:1, exportedAt:'ISO 时间', note:{ title, star, createdAt },
-          pages:[{ no, template, bg, strokes }] }
+   结构：{ app:'KY-notebook', v:1, exportedAt:'ISO 时间',
+          note:{ title, star, createdAt, src? }, pages:[{ no, template, bg, strokes }] }
    - 导入只认 v（更早的导出把版本号写在 version 里，一并兼容）
    - 校验失败一律返回 { ok:false, error }，不抛异常，调用方直接拿去提示
-   - 底图（bg 是图片/PDF 原图）和缩略图不在 JSON 里，导入后也就没有
+   - bg 有两种：false（不导底图，默认）或 data:image/... 字符串（勾了「包含底图」）
+   - note.src = { kind:'pdf'|'img'|'shot', name, page } 是 M2 加的可选字段，老文件没有也能导入
 */
 export const SCHEMA_V = 1;
 
 const TEMPLATES = ['blank', 'lines', 'grid', 'dots'];
 const TOOLS = ['pen', 'hl', 'er'];
 const COLOR_RE = /^#[0-9a-f]{3,8}$/i;
+const BG_RE = /^data:image\/(png|jpe?g|webp|gif)/i;
+const SRC_KINDS = ['pdf', 'img', 'shot'];
 
 const bad = (error) => ({ ok: false, error });
+
+/** 只保留认识的来源字段；不合法就当没有 */
+function readSrc(n) {
+  const s = n && typeof n === 'object' ? n.src : null;
+  if (!s || typeof s !== 'object' || Array.isArray(s)) return null;
+  const kind = SRC_KINDS.includes(s.kind) ? s.kind : '';
+  if (!kind) return null;
+  const name = typeof s.name === 'string' ? s.name.slice(0, 200) : '';
+  const page = Number.isInteger(s.page) && s.page > 0 ? s.page : 0;
+  return { kind, name, page };
+}
 
 /** 组装导出的 JSON 对象（note 里不含 thumb：导入用不上，留着只是白占体积） */
 export function buildNoteJson(note, pages) {
@@ -21,6 +35,8 @@ export function buildNoteJson(note, pages) {
     createdAt: note.createdAt || Date.now(),
     pageCount: pages.length,
   };
+  const src = readSrc(note);
+  if (src) meta.src = src;
   return {
     app: 'KY-notebook',
     v: SCHEMA_V,
@@ -76,11 +92,13 @@ export function parseNoteJson(text) {
       no: pages.length,
       template: TEMPLATES.includes(pg.template) ? pg.template : 'blank',
       strokes,
+      /* 只有 data:image 的字符串才算底图；老文件的 bg:true/false 一律当没有 */
+      bg: typeof pg.bg === 'string' && BG_RE.test(pg.bg) ? pg.bg : null,
     });
   }
 
   const n = data.note && typeof data.note === 'object' && !Array.isArray(data.note) ? data.note : {};
   const title = typeof n.title === 'string' ? n.title.trim() : '';
   const createdAt = typeof n.createdAt === 'number' && isFinite(n.createdAt) ? n.createdAt : Date.now();
-  return { ok: true, title, star: n.star ? 1 : 0, createdAt, pages };
+  return { ok: true, title, star: n.star ? 1 : 0, createdAt, src: readSrc(n), pages };
 }
