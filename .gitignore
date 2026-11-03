@@ -14,3 +14,4 @@ node_modules/
 
 # AI 编程助手的本地工作日志（不入库）
 .workbuddy/
+_local/
