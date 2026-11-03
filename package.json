@@ -1,0 +1,12 @@
+{
+  "name": "ky-notebook",
+  "version": "0.1.0",
+  "private": true,
+  "description": "手写笔记 / 拍题 / 图片·PDF 批注，纯前端 + 你自己的 OpenAI 兼容接口",
+  "type": "module",
+  "scripts": {
+    "start": "python serve.py 8765",
+    "serve": "python serve.py 8765"
+  },
+  "license": "MIT"
+}

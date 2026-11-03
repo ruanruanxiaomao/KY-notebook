@@ -1,0 +1,13 @@
+# 本地测试产物
+_test.pdf
+*.log
+
+# 系统 / 编辑器
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# 依赖（本demo没有，但留着防止以后加构建）
+node_modules/
+.env

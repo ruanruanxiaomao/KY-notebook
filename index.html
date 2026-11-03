@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>KY-notebook · 手写笔记 / 拍题 / 批注</title>
+<link rel="stylesheet" href="src/styles.css">
+<script>
+  window.MathJax = {
+    tex: { inlineMath: [['$', '$'], ['\\(', '\\)']], displayMath: [['$$', '$$'], ['\\[', '\\]']] },
+    svg: { fontCache: 'global' },
+    options: { skipHtmlTags: ['script', 'noscript', 'style', 'textarea', 'pre', 'code'] }
+  };
+</script>
+<script defer src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-svg.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.min.js"></script>
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">✍️ KY-notebook</div>
+  <nav class="tabs">
+    <button class="tab on" data-tab="ink">笔记本</button>
+    <button class="tab" data-tab="shot">拍题</button>
+    <button class="tab" data-tab="annot">图片 / PDF 批注</button>
+  </nav>
+  <div class="spacer"></div>
+  <button class="btn ghost" id="btnPrompts" title="管理提示词">提示词</button>
+  <button class="btn ghost" id="btnSettings" title="设置 AI 接口">设置</button>
+</header>
+
+<main>
+  <!-- ============ 笔记本 ============ -->
+  <section class="view" id="view-ink">
+    <aside class="lib">
+      <div class="lib-head">
+        <strong>我的笔记</strong>
+        <button class="btn mini" id="inkNew">＋ 新建</button>
+      </div>
+      <div class="lib-grid" id="inkLib"></div>
+      <div class="lib-empty" id="inkEmpty">还没有笔记，点「＋ 新建」开始。</div>
+    </aside>
+
+    <section class="editor" id="inkEditor" hidden>
+      <div class="ed-head">
+        <button class="btn ghost mini" id="inkBack">‹ 笔记库</button>
+        <input class="title" id="inkTitle" placeholder="未命名笔记">
+        <button class="btn mini" id="inkStar" title="收藏">☆</button>
+        <button class="btn mini" id="inkExportPng" title="导出 PNG（当前页）">PNG</button>
+        <button class="btn mini" id="inkExportJson" title="导出 JSON（整本）">JSON</button>
+        <button class="btn mini danger" id="inkDel" title="删除这本笔记">🗑</button>
+      </div>
+
+      <div class="tools">
+        <div class="group">
+          <button class="tool on" data-tool="pen" title="笔">✏️</button>
+          <button class="tool" data-tool="hl" title="荧光笔">🖍</button>
+          <button class="tool" data-tool="er" title="橡皮">🧽</button>
+        </div>
+        <div class="group" id="inkColors"></div>
+        <div class="group" id="inkSizes"></div>
+        <div class="group">
+          <button class="tool" id="inkUndo" title="撤销">↶</button>
+          <button class="tool" id="inkRedo" title="重做">↷</button>
+          <button class="tool" id="inkClear" title="清空本页">⌫</button>
+        </div>
+        <div class="group">
+          <label class="sel">模板
+            <select id="inkTemplate">
+              <option value="blank">空白</option>
+              <option value="lines">横线</option>
+              <option value="grid">方格</option>
+              <option value="dots">点阵</option>
+            </select>
+          </label>
+        </div>
+        <div class="group pager">
+          <button class="tool" id="inkPrev" title="上一页">‹</button>
+          <span id="inkPageInfo">第 1 页</span>
+          <button class="tool" id="inkNext" title="下一页">›</button>
+          <button class="tool" id="inkAddPage" title="加一页">＋页</button>
+        </div>
+      </div>
+
+      <div class="stage" id="inkStage">
+        <div class="paper" id="inkPaper">
+          <canvas id="inkCv"></canvas>
+        </div>
+      </div>
+    </section>
+  </section>
+
+  <!-- ============ 拍题 ============ -->
+  <section class="view" id="view-shot" hidden>
+    <div class="pane left">
+      <div class="pane-head">
+        <strong>拍照 / 选图</strong>
+        <span class="hint">图片只发给你自己配置的 AI 接口</span>
+      </div>
+      <div class="drop" id="shotDrop">
+        <div id="shotEmpty">把题目图片拖进来，或</div>
+        <img id="shotPreview" alt="" hidden>
+      </div>
+      <div class="row">
+        <button class="btn" id="shotPick">选择图片…</button>
+        <button class="btn" id="shotCam">调用相机</button>
+        <button class="btn ghost" id="shotClear">清空</button>
+      </div>
+      <label class="field">提问方式（可在「提示词」里自己写）
+        <select id="shotPrompt"></select>
+      </label>
+      <textarea class="custom" id="shotCustom" rows="3" placeholder="临时补充要求，例如：只看第 2 题；用考研数学一的口径作答" ></textarea>
+      <div class="row">
+        <button class="btn primary" id="shotAsk">问 AI</button>
+        <span class="status" id="shotStatus"></span>
+      </div>
+      <input type="file" id="shotFile" accept="image/*" hidden>
+    </div>
+
+    <div class="pane right">
+      <div class="pane-head">
+        <strong>AI 结果</strong>
+        <div class="row tight">
+          <button class="btn mini" id="shotCopy">复制</button>
+          <button class="btn mini" id="shotToNote" title="把这张图当底图，新建一页笔记">存为笔记底图</button>
+        </div>
+      </div>
+      <div class="out" id="shotOut"><div class="ph">识别结果会出现在这里。你可以把解答当作草稿，再在笔记本里写自己的推导。</div></div>
+    </div>
+  </section>
+
+  <!-- ============ 图片 / PDF 批注 ============ -->
+  <section class="view" id="view-annot" hidden>
+    <div class="pane left annot-left">
+      <div class="pane-head">
+        <strong>导入图片或 PDF</strong>
+        <span class="hint">导入后可直接在页面上写字</span>
+      </div>
+      <div class="row">
+        <button class="btn" id="annotPickImg">选择图片…</button>
+        <button class="btn" id="annotPickPdf">选择 PDF…</button>
+      </div>
+      <input type="file" id="annotFileImg" accept="image/*" hidden>
+      <input type="file" id="annotFilePdf" accept="application/pdf" hidden>
+      <div class="row pager">
+        <button class="tool" id="annotPrev">‹</button>
+        <span id="annotPageInfo">— / —</span>
+        <button class="tool" id="annotNext">›</button>
+        <button class="tool" id="annotZoomOut">−</button>
+        <span id="annotZoomInfo">100%</span>
+        <button class="tool" id="annotZoomIn">＋</button>
+      </div>
+      <label class="field">AI 解析 / 翻译本页用哪个提示词
+        <select id="annotPrompt"></select>
+      </label>
+      <div class="row">
+        <button class="btn primary" id="annotAsk">让 AI 解析本页</button>
+        <span class="status" id="annotStatus"></span>
+      </div>
+      <div class="row tight wrap">
+        <button class="btn mini" id="annotExportPng">导出本页 PNG</button>
+        <button class="btn mini" id="annotExportJson">导出批注 JSON</button>
+      </div>
+      <div class="out small" id="annotOut"><div class="ph">AI 结果会出现在这里。</div></div>
+    </div>
+
+    <div class="pane right annot-stage-wrap">
+      <div class="stage" id="annotStage">
+        <div class="paper" id="annotPaper">
+          <canvas id="annotBg"></canvas>
+          <canvas id="annotCv"></canvas>
+        </div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<!-- ============ 设置 ============ -->
+<dialog id="dlgSettings" class="dlg">
+  <form method="dialog" class="dlg-body">
+    <h3>AI 接口</h3>
+    <p class="hint">填任意 OpenAI 兼容接口（DeepSeek / OpenAI / 通义 / 本地 ollama 的 <code>/v1</code> 都可以）。Key 只存在这台设备上。</p>
+    <label class="field">Base URL
+      <input id="cfgBase" placeholder="https://api.deepseek.com/v1">
+    </label>
+    <label class="field">API Key
+      <input id="cfgKey" type="password" placeholder="sk-…">
+    </label>
+    <label class="field">模型
+      <input id="cfgModel" placeholder="deepseek-chat">
+    </label>
+    <label class="check"><input type="checkbox" id="cfgVision"> 这个模型支持看图（拍题 / 图片解析需要）</label>
+    <div class="row end">
+      <button class="btn ghost" value="cancel">取消</button>
+      <button class="btn primary" id="cfgSave" value="save">保存</button>
+    </div>
+  </form>
+</dialog>
+
+<!-- ============ 提示词 ============ -->
+<dialog id="dlgPrompts" class="dlg wide">
+  <form method="dialog" class="dlg-body">
+    <h3>提示词</h3>
+    <p class="hint">每条提示词 = 名字 + 系统提示（可选） + 要求。拍题、图片解析、PDF 批注都可以选它。</p>
+    <div class="prompt-list" id="promptList"></div>
+    <div class="prompt-edit">
+      <label class="field">名字<input id="pName" placeholder="例如：题目解析"></label>
+      <label class="field">系统提示（可选）<textarea id="pSys" rows="2" placeholder="你是一位考研数学老师…"></textarea></label>
+      <label class="field">要求<textarea id="pBody" rows="4" placeholder="请逐题抄下图中题目，保持 LaTeX 公式，再给出考点、思路、答案。"></textarea></label>
+      <div class="row">
+        <button class="btn" id="pSave" type="button">保存这条</button>
+        <button class="btn ghost" id="pReset" type="button">恢复默认</button>
+        <span class="status" id="pStatus"></span>
+      </div>
+    </div>
+    <div class="row end"><button class="btn primary" value="ok">完成</button></div>
+  </form>
+</dialog>
+
+<script type="module" src="src/main.js"></script>
+</body>
+</html>
