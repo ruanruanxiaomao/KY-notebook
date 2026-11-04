@@ -29,6 +29,7 @@ export class InkBoard {
     this.color = COLORS[0];
     this.size = SIZES[1];
     this.strokes = [];
+    this.hidden = new Set();        /* 暂时不画的笔画：边写边识别时，墨迹「变成」文字的那一刻藏起来 */
     this.undoStack = [];
     this.redoStack = [];
     this.bg = null;
@@ -44,6 +45,8 @@ export class InkBoard {
     this._k = 1;      // 页面坐标 → 设备像素
     this._s = 1;      // 页面坐标 → CSS 像素
     this.onChange = null;
+    this.onStrokeEnd = null;         /* 抬笔后回调：画布自动转文字要用 */
+    this.onItemsChanged = null;      /* 撤销恢复了元素：交给上层重画 DOM */
     this.hud = null;                 /* 调试用的延迟面板 */
     this._lag = { n: 0, sum: 0, max: 0 };
     this._fps = { t: 0, n: 0, v: 0 };
@@ -139,6 +142,7 @@ export class InkBoard {
     this.strokes = Array.isArray(strokes) ? strokes.map((s) => ({ ...s, pts: s.pts.slice() })) : [];
     this.undoStack = [];
     this.redoStack = [];
+    this.hidden.clear();
     this.redraw();
   }
 
@@ -188,7 +192,7 @@ export class InkBoard {
     octx.setTransform(this._k, 0, 0, this._k, 0, 0);
     const save = this.ctx;
     this.ctx = octx;
-    for (const st of this.strokes) this._paintStroke(st);
+    for (const st of this.strokes) if (!this.hidden.has(st)) this._paintStroke(st);
     this.ctx = save;
     this.drawLive();
   }
@@ -286,6 +290,7 @@ export class InkBoard {
       e.preventDefault();
       if (this.tool === 'pan') return;     /* 抓手：不在画布上落笔，交给外层做平移 */
       if (this.tool === 'sel') return;     /* 选择：点的是插入的图片/文字，不落笔 */
+      if (this.tool === 'lasso') return;   /* 圈选：框选由上层做，别画上去 */
       if (this.tool === 'del') {           /* 整笔删除：点一下删掉命中的那一笔 */
         this._delOn = true;
         this._delPushed = false;
@@ -376,6 +381,7 @@ export class InkBoard {
       this.drawLive();
       this._rect = null;
       if (this.onChange) this.onChange();
+      if (this.onStrokeEnd) this.onStrokeEnd(st);
       if (this.hud) this._hudUpdate(st);
     };
 
@@ -469,26 +475,88 @@ export class InkBoard {
   }
 
   /* ---------- 撤销 / 重做 ---------- */
+  /** 快照带上页面元素：「墨迹转文字」要能一步撤回成原来的笔迹 */
+  _snap() {
+    return {
+      strokes: this.strokes.map((s) => ({ ...s, pts: s.pts.slice() })),
+      items: (this.items || []).map((it) => ({ ...it })),
+    };
+  }
+
+  _applySnap(s) {
+    this.strokes = s.strokes;
+    this.hidden.clear();
+    if (Array.isArray(s.items) && Array.isArray(this.items)) {
+      this.items.length = 0;
+      for (const it of s.items) this.items.push(it);
+      if (this.onItemsChanged) this.onItemsChanged();
+    }
+  }
+
   pushUndo() {
-    this.undoStack.push(this.strokes.map((s) => ({ ...s, pts: s.pts.slice() })));
+    this.undoStack.push(this._snap());
     if (this.undoStack.length > 100) this.undoStack.shift();
     this.redoStack.length = 0;
   }
 
   undo() {
     if (!this.undoStack.length) return;
-    this.redoStack.push(this.strokes.map((s) => ({ ...s, pts: s.pts.slice() })));
-    this.strokes = this.undoStack.pop();
+    if (this.onBeforeUndo) this.onBeforeUndo();
+    this.redoStack.push(this._snap());
+    this._applySnap(this.undoStack.pop());
     this.redraw();
     if (this.onChange) this.onChange();
   }
 
   redo() {
     if (!this.redoStack.length) return;
-    this.undoStack.push(this.strokes.map((s) => ({ ...s, pts: s.pts.slice() })));
-    this.strokes = this.redoStack.pop();
+    this.undoStack.push(this._snap());
+    this._applySnap(this.redoStack.pop());
     this.redraw();
     if (this.onChange) this.onChange();
+  }
+
+  /** 删掉指定的这些笔画（墨迹转文字用）：一次操作只记一次撤销 */
+  removeStrokes(list) {
+    if (!list || !list.length) return 0;
+    const set = new Set(list);
+    const before = this.strokes.length;
+    this.strokes = this.strokes.filter((s) => !set.has(s));
+    const n = before - this.strokes.length;
+    if (n) {
+      for (const st of list) this.hidden.delete(st);
+      this.redraw();
+      if (this.onChange) this.onChange();
+    }
+    return n;
+  }
+
+  /** 暂时藏起 / 放出这些笔画（不删数据，用于「墨迹正在变成文字」的过渡） */
+  hideStrokes(list, on) {
+    if (!list || !list.length) return;
+    for (const st of list) {
+      if (on) this.hidden.add(st); else this.hidden.delete(st);
+    }
+    this.redraw();
+  }
+
+  /** 矩形（页面坐标）里碰到的笔画：套索圈选转文字用 */
+  strokesInRect(x0, y0, x1, y1) {
+    const ax = Math.min(x0, x1), bx = Math.max(x0, x1);
+    const ay = Math.min(y0, y1), by = Math.max(y0, y1);
+    const out = [];
+    for (const st of this.strokes) {
+      const pts = st.pts;
+      const total = Math.floor(pts.length / 3);
+      if (!total) continue;
+      let inside = 0;
+      for (let i = 0; i < pts.length; i += 3) {
+        if (pts[i] >= ax && pts[i] <= bx && pts[i + 1] >= ay && pts[i + 1] <= by) inside++;
+      }
+      /* 一半以上的点在框里才算，免得把划过去的笔误收进来 */
+      if (inside / total >= 0.5) out.push(st);
+    }
+    return out;
   }
 
   clear() {
@@ -517,7 +585,7 @@ export class InkBoard {
     const lh = size * 1.55;
     const maxW = Math.max(10, it.w * k);
     ctx.save();
-    ctx.font = `${size}px "Kaiti SC","STKaiti",KaiTi,system-ui,sans-serif`;
+    ctx.font = `${size}px -apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",system-ui,sans-serif`;
     ctx.fillStyle = it.color || '#1f1c18';
     ctx.textBaseline = 'top';
     const lines = [];
@@ -555,6 +623,7 @@ export class InkBoard {
     await this._paintItems(ctx, scale, 'below');
     ctx.setTransform(scale, 0, 0, scale, 0, 0);
     for (const st of this.strokes) {
+      if (this.hidden.has(st)) continue;
       const saveCtx = this.ctx;
       this.ctx = ctx;
       this._paintStroke(st);
@@ -609,6 +678,7 @@ export class InkBoard {
     await this._paintItems(ctx, s, 'below');
     ctx.setTransform(s, 0, 0, s, 0, 0);
     for (const st of this.strokes) {
+      if (this.hidden.has(st)) continue;
       const saveCtx = this.ctx;
       this.ctx = ctx;
       this._paintStroke(st);

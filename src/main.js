@@ -90,6 +90,7 @@ async function fetchModels(auto) {
 }
 
 $('cfgFetch').onclick = () => fetchModels(false);
+$('cfgOpenPad').onclick = () => { dlgSettings.close(); notebook.openHandPad(true); };
 
 /* ---------- 提示词 ---------- */
 const dlgPrompts = $('dlgPrompts');

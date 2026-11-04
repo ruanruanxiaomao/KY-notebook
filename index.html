@@ -8,7 +8,7 @@
 <script>
   window.MathJax = {
     tex: { inlineMath: [['$', '$'], ['\\(', '\\)']], displayMath: [['$$', '$$'], ['\\[', '\\]']] },
-    svg: { fontCache: 'global' },
+    svg: { fontCache: 'local' },
     options: { skipHtmlTags: ['script', 'noscript', 'style', 'textarea', 'pre', 'code'] }
   };
 </script>
@@ -67,6 +67,7 @@
           <button class="tool" data-tool="er" title="橡皮">🧽</button>
           <button class="tool" data-tool="pan" title="抓手：拖动平移画布">✋</button>
           <button class="tool" data-tool="sel" title="选择：点选/拖动插入的图片和文字">↖</button>
+          <button class="tool" data-tool="lasso" title="圈选：框住一片笔迹，可以就地转成文字或公式">⬚</button>
         </div>
         <div class="group" id="inkColors"></div>
         <div class="group" id="inkSizes"></div>
@@ -76,7 +77,8 @@
           <button class="tool" id="inkClear" title="清空本页">⌫</button>
         </div>
         <div class="group">
-          <button class="tool" id="inkHand" title="手写转文字：在下面的板子里写字，自动变成文字写进这页的文本框">✍</button>
+          <button class="tool" id="inkHwrText" title="画布自动转文字：开着的时候，写完停笔，笔迹就地变成文字">✍</button>
+          <button class="tool" id="inkHwrTex" title="画布自动转公式：开着的时候，写完停笔，手写公式变成 LaTeX 排版">∑</button>
           <button class="tool" id="inkAddText" title="插入文字块">T</button>
           <button class="tool" id="inkAddImage" title="插入图片到本页">🖼</button>
           <button class="tool" id="inkAddPdf" title="插入 PDF（每页追加成新的一页，可直接批注）">📄</button>
@@ -113,6 +115,14 @@
           <canvas id="inkCv"></canvas>
           <div class="ink-items above" id="inkItemsAbove"></div>
         </div>
+      </div>
+
+      <!-- 圈选后浮出来的操作条 -->
+      <div class="selbar" id="hwrSelBar" hidden>
+        <span class="sel-info" id="selInfo">已选中 0 笔</span>
+        <button class="btn mini" id="selToText">转文字</button>
+        <button class="btn mini" id="selToTex">转公式</button>
+        <button class="btn mini ghost" id="selCancel">取消</button>
       </div>
 
       <!-- 手写转文字：像输入法一样写在板子里，认出字直接写进本页文本框 -->
@@ -426,6 +436,10 @@
         <input id="cfgIdle" type="number" min="200" max="2000" step="50" value="600">
       </label>
       <label class="check" style="margin-top:14px"><input type="checkbox" id="cfgHud"> 显示笔迹延迟面板</label>
+    </div>
+    <div class="row">
+      <button class="btn ghost mini" type="button" id="cfgOpenPad" title="在手写板上写，认出来写进当前页的文本框">打开底部手写板</button>
+      <span class="status" id="cfgPadStatus"></span>
     </div>
     <div class="row end">
       <button class="btn ghost" value="cancel">取消</button>

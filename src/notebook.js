@@ -4,6 +4,8 @@ import { InkBoard, PAGE_W, PAGE_H, COLORS, SIZES, imageToDataUrl, loadImageFile 
 import { buildNoteJson, parseNoteJson } from './notejson.js';
 import { mdInto } from './md.js';
 import { HwrPad } from './hwrpad.js';
+import { bboxOf, groupLines, looksLikeFormula, recognizeLocal, recognizeFormula, texToImage, inkToCanvas } from './hwr.js';
+import { chat, getCfg } from './ai.js';
 
 const LS_LAST = 'kynb_last_note';
 const LS_LAST_AT = 'kynb_last_note_at';   /* 最后落盘时间：用来判断「刚写过」要不要自动回到那本 */
@@ -187,6 +189,8 @@ export function initNotebook() {
     });
     $('inkStage').classList.toggle('grab', t === 'pan');
     $('inkStage').classList.toggle('selecting', t === 'sel');
+    $('inkStage').classList.toggle('lassoing', t === 'lasso');
+    if (t !== 'lasso') { try { clearLasso(); } catch (e) { /* 初始化早期还没定义 */ } }
     if (t !== 'sel') { selId = null; renderItems(); }
   }
 
@@ -243,6 +247,12 @@ export function initNotebook() {
         rs.className = 'it-rs';
         rs.title = '拖动改大小';
         rs.addEventListener('pointerdown', (e) => startResize(e, it, el));
+        el.appendChild(rs);
+      } else {
+        const rs = document.createElement('div');
+        rs.className = 'it-rs';
+        rs.title = '拖动缩放：上下拖改字号，左右拖改宽度';
+        rs.addEventListener('pointerdown', (e) => startTextResize(e, it, el));
         el.appendChild(rs);
       }
       el.addEventListener('pointerdown', (e) => startDrag(e, it, el));
@@ -307,6 +317,39 @@ export function initNotebook() {
       window.removeEventListener('pointermove', move);
       window.removeEventListener('pointerup', up);
       saveSoon(true);
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+  }
+
+  /** 文本框缩放：上下拖改字号（字会跟着变大变小），左右拖只改折行宽度 */
+  function startTextResize(e, it, el) {
+    e.preventDefault();
+    e.stopPropagation();
+    pickItem(it.id);
+    activeTextId = it.id;
+    const k = (board.paper.clientWidth || PAGE_W) / PAGE_W;
+    const s0 = { x: e.clientX, y: e.clientY, w: it.w || 200, size: it.size || 32 };
+    const tx = el.querySelector('.tx');
+    const maxW = () => Math.max(80, Math.round(board.pageW - it.x - 12));
+    const move = (ev) => {
+      const dx = (ev.clientX - s0.x) / k;
+      const dy = (ev.clientY - s0.y) / k;
+      if (Math.abs(dx) > Math.abs(dy) * 1.4) {
+        it.w = Math.max(60, Math.min(maxW(), Math.round(s0.w + dx)));   /* 只改折行宽度 */
+      } else {
+        const f = Math.max(0.25, Math.min(4, (s0.size + dy * 0.45) / s0.size));
+        it.size = Math.max(10, Math.min(160, Math.round(s0.size * f)));
+        it.w = Math.max(60, Math.min(maxW(), Math.round(s0.w * f)));
+      }
+      el.style.width = it.w + 'px';
+      if (tx) tx.style.fontSize = it.size + 'px';
+    };
+    const up = () => {
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+      saveSoon(true);
+      toast(`字号 ${it.size}px · 宽度 ${it.w}px`);
     };
     window.addEventListener('pointermove', move);
     window.addEventListener('pointerup', up);
@@ -384,17 +427,336 @@ export function initNotebook() {
     { onCommit: (text) => commitHwr(text), onBack: (n) => backHwr(n) },
   );
 
-  $('inkHand').onclick = () => {
-    if (!st.note || st.mode === 'md') return;
-    const on = !hwr.open;
-    hwr.show(on);
-    $('inkHand').classList.toggle('on', on);
-    if (on) toast('在手写板上写，认出字直接写进这一页的文本框');
-  };
-  $('hwrClose').onclick = () => { hwr.show(false); $('inkHand').classList.remove('on'); };
+  /* 底部手写板：入口在「设置」里（主工具栏已经被画布识别占了） */
+  function openHandPad(on) {
+    if (!st.note || st.mode === 'md') { toast('先打开一本手写笔记', true); return; }
+    hwr.show(on !== false);
+  }
+  $('hwrClose').onclick = () => hwr.show(false);
   $('hwrBack').onclick = () => backHwr(1);
   $('hwrEnter').onclick = () => commitHwr('\n');
   $('hwrClear').onclick = () => hwr.clear();
+
+  /* ================= 画布上写完就地转文字 / 公式 ================= */
+  /* 两种入口：
+     ① 自动：开着 ✍ / ∑ 时，在纸上写完停笔一会儿，这一行笔迹就地换成文字（或公式）
+     ② 手动：⬚ 圈住一片笔迹 → 浮出「转文字 / 转公式」，点哪个转哪个
+     转换都是「删笔迹 + 原位加内容」，并且整件事只占一步撤销，↶ 能退回原笔迹。 */
+  const HWR_MODE_KEY = 'kynb_hwrmode';
+  let hwrMode = 'off';                 // 'off' | 'text' | 'formula'
+  let live = null;                     // 正在写的那一行：{ strokes, item, gen, pt, ct }
+  let pendingTex = new Set();          // 公式模式攒的笔画
+  let texTimer = 0;
+  let busyConv = false;
+
+  try { hwrMode = localStorage.getItem(HWR_MODE_KEY) || 'off'; } catch (e) { hwrMode = 'off'; }
+  if (hwrMode !== 'text' && hwrMode !== 'formula') hwrMode = 'off';
+
+  function paintHwrBtns() {
+    $('inkHwrText').classList.toggle('on', hwrMode === 'text');
+    $('inkHwrTex').classList.toggle('on', hwrMode === 'formula');
+  }
+  paintHwrBtns();
+
+  function setHwrMode(m) {
+    hwrMode = hwrMode === m ? 'off' : m;
+    try { localStorage.setItem(HWR_MODE_KEY, hwrMode); } catch (e) { /* 无痕 */ }
+    paintHwrBtns();
+    try { commitLine(); } catch (e) { /* 还没定义 */ }
+    pendingTex.clear();
+    clearTimeout(texTimer);
+    if (hwrMode === 'text') toast('边写边认已开：写完一个字就变成文字，停一下把整行定稿');
+    else if (hwrMode === 'formula') {
+      toast('公式模式：写完停笔，手写公式变成 LaTeX 排版（要用 AI 接口）');
+      if (!getCfg().vision) toast('还没勾「模型支持看图」，公式模式需要视觉模型', true);
+    } else toast('画布识别已关，笔迹保持原样');
+  }
+
+  $('inkHwrText').onclick = () => { if (st.note && st.mode !== 'md') setHwrMode('text'); };
+  $('inkHwrTex').onclick = () => { if (st.note && st.mode !== 'md') setHwrMode('formula'); };
+
+  board.onItemsChanged = () => renderItems();
+
+  /* 正在预览的这一行，用户按撤销 = 不要这次转换：把文字撤掉，墨迹由 undo 快照恢复 */
+  board.onBeforeUndo = () => {
+    if (!live) return;
+    const L = live;
+    live = null;
+    clearTimeout(L.pt);
+    clearTimeout(L.ct);
+    if (L.item) {
+      const p = pageNow();
+      if (p && Array.isArray(p.items)) {
+        p.items = p.items.filter((x) => x.id !== L.item.id);
+        board.items = p.items;
+        renderItems();
+      }
+    }
+  };
+
+  /** 一行笔迹 → 原位文字块（字号按笔迹高度，颜色跟着笔走） */
+  function insertTextFromInk(list, text) {
+    const bb = bboxOf(list);
+    if (!bb) return null;
+    const p = pageNow();
+    if (!p) return null;
+    if (!Array.isArray(p.items)) p.items = [];
+    const size = Math.round(Math.max(14, Math.min(160, bb.h * 1.15)));
+    const it = {
+      id: uid('it'), type: 'text', z: 'above', text,
+      size, color: (list[0] && list[0].c) || '#1f1c18',
+      x: Math.round(bb.x - size * 0.16),
+      y: Math.round(bb.y - size * 0.18),
+      w: Math.round(Math.max(bb.w + size * 0.8, size * 2)),
+      h: Math.round(size * 1.5),
+    };
+    p.items.push(it);
+    return it;
+  }
+
+  /** 一行笔迹 → 原位公式（LaTeX 经 MathJax 排成 SVG 图片，可拖动、可缩放） */
+  function insertTexFromInk(list, tex) {
+    const bb = bboxOf(list);
+    const p = pageNow();
+    if (!bb || !p) return null;
+    if (!Array.isArray(p.items)) p.items = [];
+    const color = (list[0] && list[0].c) || '#1f1c18';
+    const em = Math.max(10, Math.min(140, bb.h * 0.92));
+    const img = texToImage(tex, em, color);
+    /* 让排出来的公式高度正好等于原来手写的高度 */
+    const k = bb.h / Math.max(1, img.h);
+    const it = {
+      id: uid('it'), type: 'image', z: 'above', src: img.src, tex: img.tex,
+      x: Math.round(bb.x), y: Math.round(bb.y),
+      w: Math.round(img.w * k), h: Math.round(bb.h),
+    };
+    p.items.push(it);
+    return it;
+  }
+
+  /**
+   * 把一组笔画转成文字或公式。
+   * kind: 'text' | 'formula'
+   * 返回 true 表示转成功（笔画已经换成内容）
+   */
+  async function convertInk(list, kind) {
+    if (!list || !list.length || !st.note) return false;
+    const ink = inkToCanvasCached(list);
+    if (!ink) return false;
+    let made = null;
+    if (kind === 'formula') {
+      if (!getCfg().vision) {
+        toast('转公式要用「支持看图」的模型：去设置里勾上，或换个视觉模型', true);
+        return false;
+      }
+      const r = await recognizeFormula(ink, chat);
+      if (!r.tex) { toast('没认出公式，笔迹留着没动', true); return false; }
+      made = insertTexFromInk(list, r.tex);
+      if (made) toast(`已转成公式（${r.tex.slice(0, 40)}）· 点 ↶ 可退回笔迹`);
+    } else {
+      const r = await recognizeLocal(ink);
+      if (!r.text) { toast('没认出字，笔迹留着没动', true); return false; }
+      if (r.score < 0.45) {
+        toast('这段不太确定，先没动它；想硬认就用 ⬚ 圈住后点「转文字」', true);
+        return false;
+      }
+      made = insertTextFromInk(list, r.text);
+      if (made) {
+        const hint = looksLikeFormula(list) ? '（看着像公式？切到 ∑ 重写一次，或用 ⬚ 圈住点「转公式」）' : '';
+        toast(`已转成文字「${r.text.slice(0, 12)}」· 点 ↶ 可退回笔迹${hint}`);
+      }
+    }
+    if (!made) return false;
+    board.removeStrokes(list);
+    renderItems();
+    saveSoon(true);
+    return true;
+  }
+
+  /* 光栅化一次就够：转文字和转公式都吃同一张图 */
+  function inkToCanvasCached(list) {
+    try { return inkToCanvas(list); } catch (e) { return null; }
+  }
+
+  /* ---------- 边写边认（✍）：一行写到底，墨迹一个一个字变成文字 ---------- */
+  /* 做法：抬笔 300ms 就把「这一行到目前为止的墨迹」整行认一次，认出来的字原位铺成文字块，
+     同时把这一行墨迹临时藏起来（数据还在，只是不画）。接着写的字照常落在后面，
+     下一次再整行认一遍、整体刷新 —— 所以越写越准，而不是一个字一个结果。
+     停笔 1.5s、换行、或关掉模式 → 定稿：把这一行墨迹真删掉，只留文字。 */
+  function newLive() {
+    return { strokes: [], item: null, gen: 0, pt: 0, ct: 0 };
+  }
+
+  function breaksLine(stroke) {
+    if (!live || !live.strokes.length) return false;
+    const b = bboxOf([stroke]);
+    const all = bboxOf(live.strokes);
+    if (!b || !all) return false;
+    const lineH = Math.max(16, all.h);
+    return b.y > all.y + all.h + lineH * 0.45 && b.x < all.x + all.w * 0.7;
+  }
+
+  async function previewLine() {
+    if (!live || busyConv || !st.note) return;
+    const L = live;
+    const strokes = L.strokes.slice();
+    const gen = L.gen;
+    if (!strokes.length) return;
+    const ink = inkToCanvasCached(strokes);
+    if (!ink) return;
+    busyConv = true;
+    try {
+      const r = await recognizeLocal(ink);
+      if (!live || live !== L || live.gen !== gen) return;   /* 期间又写了新的：这次结果过期 */
+      if (!r.text || r.score < 0.4) return;                  /* 认不准就先不动墨迹 */
+      if (!L.item) {
+        L.item = insertTextFromInk(strokes, r.text);
+      } else {
+        L.item.text = r.text;
+        const bb = bboxOf(strokes);
+        if (bb) L.item.w = Math.round(Math.max(bb.w + L.item.size * 0.9, L.item.size * 2));
+      }
+      board.hideStrokes(strokes, true);   /* 这一行的墨迹先藏起来，屏幕上只剩文字 */
+      renderItems();
+      saveSoon(false);
+    } catch (e) {
+      /* 识别失败就当没发生，墨迹还在 */
+    } finally {
+      busyConv = false;
+    }
+  }
+
+  /** 这一行定稿：墨迹真删掉，文字留下（已占好最后那次 pushUndo） */
+  function commitLine() {
+    const L = live;
+    if (!L) return;
+    clearTimeout(L.pt);
+    clearTimeout(L.ct);
+    live = null;
+    if (!L.item) return;
+    /* 快照里把这行文字块摘掉：撤销后回到「整行墨迹还在、还没转」的状态 */
+    const snap = board._snap();
+    snap.items = snap.items.filter((x) => x.id !== L.item.id);
+    board.undoStack.push(snap);
+    if (board.undoStack.length > 100) board.undoStack.shift();
+    board.redoStack.length = 0;
+    board.removeStrokes(L.strokes);
+    renderItems();
+    saveSoon(true);
+  }
+
+  /** 公式模式：AI 慢，不适合每个字刷一遍，写完整段再一次性转 */
+  async function flushFormula() {
+    if (busyConv || !st.note) return;
+    const list = [...pendingTex].filter((s) => board.strokes.indexOf(s) >= 0);
+    pendingTex.clear();
+    if (!list.length) return;
+    busyConv = true;
+    try {
+      const lines = groupLines(list);
+      for (const line of lines) {
+        if (!line.length) continue;
+        board.pushUndo();
+        await convertInk(line, 'formula');
+      }
+    } catch (e) {
+      toast('公式转换失败：' + (e && e.message ? e.message : e), true);
+    } finally {
+      busyConv = false;
+    }
+  }
+
+  board.onStrokeEnd = (stroke) => {
+    if (hwrMode === 'off' || !st.note || st.mode === 'md') return;
+    if (stroke.t !== 'pen') return;          /* 荧光笔、橡皮不参与 */
+
+    if (hwrMode === 'formula') {
+      pendingTex.add(stroke);
+      clearTimeout(texTimer);
+      texTimer = setTimeout(() => flushFormula(), 1500);
+      return;
+    }
+
+    if (breaksLine(stroke)) commitLine();
+    if (!live) live = newLive();
+    const L = live;
+    L.strokes.push(stroke);
+    L.gen++;
+    const gen = L.gen;
+    clearTimeout(L.pt);
+    clearTimeout(L.ct);
+    L.pt = setTimeout(() => { if (live === L && L.gen === gen) previewLine(); }, 300);
+    L.ct = setTimeout(() => { if (live === L && L.gen === gen) commitLine(); }, 2200);
+  };
+
+  /* ---------- ⬚ 圈选：框住一片笔迹，就地转换 ---------- */
+  const selBar = $('hwrSelBar');
+  let lasso = null;         // {x0,y0,x1,y1, strokes}
+
+  function pagePos(e) {
+    const r = board.cv.getBoundingClientRect();
+    const k = r.width / board.pageW || 1;
+    return [(e.clientX - r.left) / k, (e.clientY - r.top) / k];
+  }
+
+  function clearLasso() {
+    lasso = null;
+    selBar.hidden = true;
+    const m = board.paper.querySelector('.marquee');
+    if (m) m.remove();
+  }
+
+  stageEl.addEventListener('pointerdown', (e) => {
+    if (st.tool !== 'lasso' || !st.note || st.mode === 'md') return;
+    e.preventDefault();
+    clearLasso();
+    const [x, y] = pagePos(e);
+    const box = document.createElement('div');
+    box.className = 'marquee';
+    board.paper.appendChild(box);
+    lasso = { x0: x, y0: y, x1: x, y1: y, box, strokes: null, pid: e.pointerId };
+    const move = (ev) => {
+      if (!lasso) return;
+      const [nx, ny] = pagePos(ev);
+      lasso.x1 = nx; lasso.y1 = ny;
+      const s = (board.paper.clientWidth || PAGE_W) / PAGE_W;
+      box.style.left = Math.min(lasso.x0, nx) * s + 'px';
+      box.style.top = Math.min(lasso.y0, ny) * s + 'px';
+      box.style.width = Math.abs(nx - lasso.x0) * s + 'px';
+      box.style.height = Math.abs(ny - lasso.y0) * s + 'px';
+    };
+    const up = () => {
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+      if (!lasso) return;
+      const L = lasso;
+      const list = board.strokesInRect(L.x0, L.y0, L.x1, L.y1);
+      if (!list.length) { clearLasso(); toast('这一框里没有笔迹', true); return; }
+      L.strokes = list;
+      $('selInfo').textContent = `已选中 ${list.length} 笔`;
+      selBar.hidden = false;
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+  });
+
+  $('selCancel').onclick = () => { clearLasso(); setTool(st.tool); };
+  $('selToText').onclick = async () => {
+    if (!lasso || !lasso.strokes) return;
+    const list = lasso.strokes;
+    clearLasso();
+    board.pushUndo();
+    await convertInk(list, 'text');
+    setTool('pen');
+  };
+  $('selToTex').onclick = async () => {
+    if (!lasso || !lasso.strokes) return;
+    const list = lasso.strokes;
+    clearLasso();
+    board.pushUndo();
+    await convertInk(list, 'formula');
+    setTool('pen');
+  };
 
   function openTextDialog(it) {
     editingId = it ? it.id : null;
@@ -542,6 +904,10 @@ export function initNotebook() {
   /** quick=true：只写页面和元数据、跳过缩略图与重绘列表——切后台 / 转屏时用，越快落盘越好 */
   async function saveNow(quick) {
     if (!st.note) return;
+    /* 还在「边写边认」的中间态就先把这一行定稿，否则存下去会留下「隐藏的墨迹 + 文字」，重开就重影了 */
+    if (live) {
+      try { commitLine(); } catch (e) { /* 初始化早期 */ }
+    }
     if (st.mode === 'md') {
       st.note.title = titleEl.value.trim() || '未命名笔记';
       st.note.md = st.md || '';
@@ -594,6 +960,10 @@ export function initNotebook() {
     if (!Array.isArray(p.items)) p.items = [];
     selId = null;
     activeTextId = null;      /* 换页了，手写文字重新找个框 */
+    try { commitLine(); } catch (e) { /* 初始化早期还没定义 */ }
+    pendingTex.clear();
+    clearTimeout(texTimer);
+    try { clearLasso(); } catch (e) { /* 初始化早期还没定义 */ }
     board.loadPage({ template: p.template, bg: p.bg, strokes: p.strokes, items: p.items });
     renderItems();
     tplSel.value = p.template || 'blank';
@@ -655,7 +1025,6 @@ export function initNotebook() {
     $('inkStage').hidden = true;
     $('inkMd').hidden = false;
     hwr.show(false);
-    $('inkHand').classList.remove('on');
     $('inkToMap').hidden = false;
     $('inkExportPng').hidden = true;
     pageInfo.textContent = '文字笔记';
@@ -726,7 +1095,6 @@ export function initNotebook() {
     st.md = '';
     activeTextId = null;
     hwr.show(false);
-    $('inkHand').classList.remove('on');
     $('inkMd').hidden = true;
     $('inkTools').hidden = false;
     $('inkStage').hidden = false;
@@ -1157,7 +1525,7 @@ export function initNotebook() {
   }
 
   const api = { renderLib, newNote, openNote, board, hwr, state: st, addBgPage, addBgNote, addMdNote, toast,
-    renderItems, setHud: (on) => board.setHud(on) };
+    renderItems, openHandPad, convertInk, setHwrMode, setHud: (on) => board.setHud(on) };
   noteApi = api;
   /* 上次开了延迟面板就继续开着（调试用，不影响写字） */
   try { if (localStorage.getItem('kynb_hud') === '1') board.setHud(true); } catch (e) { /* 无痕模式 */ }

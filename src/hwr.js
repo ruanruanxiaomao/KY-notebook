@@ -29,6 +29,23 @@ export function setHwrCfg(c) {
 
 /* ---------------- 笔画 → 白底墨迹图 ---------------- */
 
+/* 两个地方的笔画格式不一样：
+   画板（inkboard）是扁平三元组 [x,y,压感, x,y,压感, ...]，手写板是 [[x,y], ...]
+   统一用 eachPt 遍历，别在这里假设某一种 */
+function eachPt(pts, fn) {
+  if (!pts || !pts.length) return;
+  if (typeof pts[0] === 'number') {
+    for (let i = 0; i + 1 < pts.length; i += 3) fn(pts[i], pts[i + 1]);
+  } else {
+    for (const q of pts) fn(q[0], q[1]);
+  }
+}
+
+function ptCount(pts) {
+  if (!pts || !pts.length) return 0;
+  return typeof pts[0] === 'number' ? Math.floor(pts.length / 3) : pts.length;
+}
+
 /**
  * strokes: [{ pts:[[x,y],...], w }]，坐标用 CSS 像素即可（同一坐标系就行）
  * 输出：{ canvas, dataUrl }，四周留白，把字撑到约 120px 高，方便模型看清笔画
@@ -37,12 +54,12 @@ export function inkToCanvas(strokes) {
   let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
   let wMax = 3;
   for (const s of strokes) {
-    for (const p of s.pts) {
-      if (p[0] < x0) x0 = p[0];
-      if (p[0] > x1) x1 = p[0];
-      if (p[1] < y0) y0 = p[1];
-      if (p[1] > y1) y1 = p[1];
-    }
+    eachPt(s.pts, (x, y) => {
+      if (x < x0) x0 = x;
+      if (x > x1) x1 = x;
+      if (y < y0) y0 = y;
+      if (y > y1) y1 = y;
+    });
     if (s.w > wMax) wMax = s.w;
   }
   if (!isFinite(x0)) return null;
@@ -69,18 +86,153 @@ export function inkToCanvas(strokes) {
   /* 横向补宽后要把字放回中间 */
   const dx = Math.max(0, (W - (bw + pad * 2) * k) / 2);
   for (const s of strokes) {
-    const pts = s.pts;
-    if (!pts.length) continue;
+    const n = ptCount(s.pts);
+    if (!n) continue;
     g.lineWidth = Math.max(2.2, Math.min(14, (s.w || wMax) * k * 1.1));
     g.beginPath();
-    g.moveTo((pts[0][0] + ox) * k + dx, (pts[0][1] + oy) * k);
-    if (pts.length === 1) g.lineTo((pts[0][0] + ox) * k + dx + 0.6, (pts[0][1] + oy) * k);
-    for (let i = 1; i < pts.length; i++) {
-      g.lineTo((pts[i][0] + ox) * k + dx, (pts[i][1] + oy) * k);
-    }
+    let first = true;
+    eachPt(s.pts, (x, y) => {
+      const px = (x + ox) * k + dx;
+      const py = (y + oy) * k;
+      if (first) { g.moveTo(px, py); first = false; } else g.lineTo(px, py);
+    });
+    if (n === 1) g.lineTo((x0 + ox) * k + dx + 0.6, (y0 + oy) * k);
     g.stroke();
   }
-  return { canvas: c, dataUrl: c.toDataURL('image/png') };
+  return { canvas: c, dataUrl: c.toDataURL('image/png'), bbox: { x: x0, y: y0, w: bw, h: bh } };
+}
+
+/** 一组笔画的包围盒（页面坐标） */
+export function bboxOf(strokes) {
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (const s of strokes) {
+    eachPt(s.pts, (x, y) => {
+      if (x < x0) x0 = x;
+      if (x > x1) x1 = x;
+      if (y < y0) y0 = y;
+      if (y > y1) y1 = y;
+    });
+  }
+  if (!isFinite(x0)) return null;
+  return { x: x0, y: y0, w: Math.max(1, x1 - x0), h: Math.max(1, y1 - y0) };
+}
+
+/**
+ * 把一堆笔画按「行」分组：纵向上互相压得住 40% 以上的算同一行，行内再按 x 排序。
+ * 画布上写完一段话，可能有 2~3 行，一行一张图分别送识别。
+ */
+export function groupLines(strokes) {
+  const items = strokes.map((s) => ({ s, b: bboxOf([s]) })).filter((x) => x.b);
+  /* 按「笔画中心」从上往下排：横线的 bbox 高度≈0，用左上角排序会把一行的笔画拆散 */
+  items.sort((a, b) => (a.b.y + a.b.h / 2) - (b.b.y + b.b.h / 2));
+  const lines = [];
+  for (const it of items) {
+    const cy = it.b.y + it.b.h / 2;
+    let hit = null;
+    for (const ln of lines) {
+      const tol = Math.max(2, (ln.y1 - ln.y0) * 0.35);
+      if (cy >= ln.y0 - tol && cy <= ln.y1 + tol) { hit = ln; break; }
+    }
+    if (!hit) {
+      hit = { y0: it.b.y, y1: it.b.y + it.b.h, list: [] };
+      lines.push(hit);
+    } else {
+      hit.y0 = Math.min(hit.y0, it.b.y);
+      hit.y1 = Math.max(hit.y1, it.b.y + it.b.h);
+    }
+    hit.list.push(it.s);
+  }
+  lines.sort((a, b) => a.y0 - b.y0);
+  return lines.map((ln) => ln.list.sort((a, b) => {
+    const ba = bboxOf([a]), bb2 = bboxOf([b]);
+    return (ba ? ba.x : 0) - (bb2 ? bb2.x : 0);
+  }));
+}
+
+/**
+ * 像不像公式：有「一条又长又平的横线，且它上下都有别的笔画」——
+ * 分数线 / 分式 / 根号横线都能命中；普通横线文字里不会有这么多上下结构。
+ * 只用来给提示，不自动改判。
+ */
+export function looksLikeFormula(strokes) {
+  const bb = bboxOf(strokes);
+  if (!bb || bb.w < 2) return false;
+  for (const s of strokes) {
+    const b = bboxOf([s]);
+    if (!b) continue;
+    const flat = b.h < Math.max(6, bb.h * 0.12);
+    const wide = b.w > bb.w * 0.45;
+    if (!flat || !wide) continue;
+    const cy = b.y + b.h / 2;
+    let above = 0, below = 0;
+    for (const o of strokes) {
+      if (o === s) continue;
+      const ob = bboxOf([o]);
+      if (!ob) continue;
+      if (ob.y + ob.h < cy - 1) above++;
+      else if (ob.y > cy + 1) below++;
+    }
+    if (above && below) return true;
+  }
+  return false;
+}
+
+/* ---------------- 公式 ---------------- */
+
+const TEX_SYS = '你是手写公式识别引擎。把图里的手写数学内容转成 LaTeX，只输出 LaTeX 代码本身：'
+  + '不要 $ 包裹、不要 \\[ \\]、不要解释、不要代码块。用标准写法（\\frac{}{}、^{}、_{}、\\sqrt{}、\\int、\\sum）。';
+
+function cleanTex(s) {
+  let t = String(s || '').trim();
+  t = t.replace(/^```[\w]*\n?/m, '').replace(/```$/m, '').trim();
+  t = t.replace(/^\$\$?/, '').replace(/\$\$?$/, '').trim();
+  t = t.replace(/^\\\[/, '').replace(/\\\]$/, '').trim();
+  t = t.replace(/^(LaTeX|公式|结果)[:：]\s*/i, '');
+  return t.split('\n').filter((x) => x.trim()).join(' ').trim();
+}
+
+/** 公式识别：交给多模态模型，返回 LaTeX 源码 */
+export async function recognizeFormula(ink, chat) {
+  const img = ink.dataUrl || (ink.canvas || ink).toDataURL('image/png');
+  const t0 = performance.now();
+  const txt = await chat({
+    system: TEX_SYS,
+    prompt: '把这张手写公式转成 LaTeX。',
+    image: img,
+    temperature: 0,
+    maxTokens: 1500,          /* 同上：思考 token + LaTeX 本身都要留出余量 */
+  });
+  return { tex: cleanTex(txt), ms: Math.round(performance.now() - t0) };
+}
+
+/**
+ * LaTeX → 一张能塞进笔记的 SVG 图片（用页面已有的 MathJax 排版）。
+ * px 是期望的行高（约等于文字块的字号）。
+ * 注意：index.html 里 MathJax 配的是 fontCache:'local'，否则生成的 SVG 会引用全局字形缓存，单独拿出来就是空白。
+ */
+export function texToImage(tex, px, color) {
+  const MJ = window.MathJax;
+  if (!MJ || typeof MJ.tex2svg !== 'function') {
+    throw new Error('MathJax 还没加载好（首次需要联网一次），先联网打开一次再试');
+  }
+  const node = MJ.tex2svg(tex, { display: false });
+  const svg = node.querySelector('svg');
+  if (!svg) throw new Error('公式排版失败');
+  const vb = (svg.getAttribute('viewBox') || '').split(/\s+/).map(Number);
+  if (vb.length !== 4 || !(vb[3] > 0)) throw new Error('公式没有可用尺寸');
+  /* MathJax 的 viewBox 单位是 em 的 1/1000 */
+  const em = Math.max(10, px);
+  const k = em / 1000;
+  const w = Math.max(8, vb[2] * k);
+  const h = Math.max(8, vb[3] * k);
+  svg.setAttribute('width', String(w));
+  svg.setAttribute('height', String(h));
+  svg.removeAttribute('style');
+  svg.setAttribute('color', color || '#1f1c18');
+  svg.style.color = color || '#1f1c18';
+  const xml = new XMLSerializer().serializeToString(svg);
+  const url = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(xml);
+  return { src: url, w, h, tex };
 }
 
 /* ---------------- 离线引擎 ---------------- */
@@ -173,15 +325,17 @@ export async function recognizeLocal(ink) {
   const p = y.data;
   let prev = -1;
   let s = '';
+  let conf = 0, confN = 0;
   for (let i = 0; i < T; i++) {
     let best = 0, bv = -Infinity;
     const base = i * C;
     for (let c = 0; c < C; c++) { const v = p[base + c]; if (v > bv) { bv = v; best = c; } }
+    if (best !== 0) { conf += bv; confN++; }
     if (best !== 0 && best !== prev) s += _chars[best] || '';
     prev = best;
   }
-  /* 模型偶尔会连着吐同一段空白/重复，去掉首尾空格 */
-  return { text: s.trim(), ms };
+  /* 置信度（只统计出了字的帧）：低于阈值就别替换墨迹，交给用户决定 */
+  return { text: s.trim(), ms, score: confN ? conf / confN : 0 };
 }
 
 /* ---------------- AI 引擎 ---------------- */
@@ -207,7 +361,7 @@ export async function recognizeAI(ink, chat) {
     prompt: '把这张手写图里的内容转成文字。',
     image: img,
     temperature: 0,
-    maxTokens: 120,
+    maxTokens: 800,          /* 推理型模型会先花 token 思考，给少了会被截断 */
   });
   return { text: cleanAiText(txt), ms: Math.round(performance.now() - t0) };
 }
