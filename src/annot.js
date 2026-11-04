@@ -3,8 +3,12 @@
    - PDF 文字层：page.getTextContent() 抽字，按 y 聚行、按行距聚段，点段落 → 原页对应位置画高亮矩形
    - 每段可「AI 解析这段」「翻译这段」（复用 prompts.js + ai.js）
    - 「存为笔记」把当前页（含笔迹）存进笔记本，并带上来源 note.src
+   M4 新增：
+   - 工具栏：笔 / 荧光 / 橡皮 / 删除整笔 / 撤销重做 / 清空本页 / 抓手 / 颜色 / 粗细
+   - 页面尺寸跟随 PDF·图片版式（竖版不再被压成横纸中间一条），支持滚轮、双指、抓手缩放平移
+   - 目录：PDF 书签（getOutline）+ 页面缩略图 + 页码跳转
 */
-import { InkBoard, PAGE_W, PAGE_H, imageToDataUrl, loadImageFile } from './inkboard.js';
+import { InkBoard, PAGE_W, PAGE_H, COLORS, imageToDataUrl, loadImageFile } from './inkboard.js';
 import { chat, cfgOk } from './ai.js';
 import { getPrompts, composePrompt, promptById } from './prompts.js';
 import { mdInto, tidyAI } from './md.js';
@@ -14,7 +18,7 @@ export function initAnnot() {
   const $ = (id) => document.getElementById(id);
   const board = new InkBoard($('annotCv'), $('annotPaper'), $('annotStage'));
   const hl = $('annotHl');
-  const st = { pages: [], idx: 0, zoom: 1, kind: '', name: '', sel: -1 };
+  const st = { pages: [], idx: 0, zoom: 1, kind: '', name: '', sel: -1, outline: [], aTool: 'pen' };
   $('annotBg').hidden = true;
 
   board.onChange = () => { if (st.pages[st.idx]) st.pages[st.idx].strokes = board.getStrokes(); };
@@ -46,25 +50,84 @@ export function initAnnot() {
     showPage(0);
   }
 
+  /* 批注页的坐标系按内容的版式比例定：A4 竖版 → 990×1400，横图 → 1800×h。
+     这样底图能铺满整张纸，放大时看到的就是「更大的 PDF」，而不是中间的窄条 */
+  function pageSizeFor(p) {
+    const iw = p.iw || PAGE_W;
+    const ih = p.ih || PAGE_H;
+    let w, h;
+    if (iw >= ih) { w = 1800; h = Math.round(1800 * ih / iw); }
+    else { h = 1400; w = Math.round(1400 * iw / ih); }
+    return { w: Math.max(360, w), h: Math.max(360, h) };
+  }
+
   function showPage(i) {
     if (!st.pages.length) return;
     st.idx = Math.max(0, Math.min(st.pages.length - 1, i));
     const p = st.pages[st.idx];
-    board.setZoom(st.zoom);
+    const sz = pageSizeFor(p);
+    p.pageW = sz.w;
+    p.pageH = sz.h;
+    board.setPageSize(sz.w, sz.h);
     board.loadPage({ template: 'blank', bg: p.bg, strokes: p.strokes || [] });
-    board.zoom = st.zoom;
-    board.layout();
+    board.setZoom(st.zoom);
     $('annotPageInfo').textContent = `${st.idx + 1} / ${st.pages.length}`;
+    $('annotJump').value = String(st.idx + 1);
+    $('annotJump').max = String(st.pages.length);
     st.sel = -1;
     hl.hidden = true;
     renderText();
   }
 
+  /* 缩略图：给目录用，120px 宽 JPEG，176 页也就 1MB 上下 */
+  function makeThumb(cv, maxW = 120) {
+    const k = Math.min(1, maxW / cv.width);
+    const t = document.createElement('canvas');
+    t.width = Math.max(1, Math.round(cv.width * k));
+    t.height = Math.max(1, Math.round(cv.height * k));
+    const x = t.getContext('2d');
+    x.fillStyle = '#fff';
+    x.fillRect(0, 0, t.width, t.height);
+    x.drawImage(cv, 0, 0, t.width, t.height);
+    return t.toDataURL('image/jpeg', 0.55);
+  }
+
+  /* PDF 书签（outline）→ [{title, level, page}]，解析不了就返回空数组 */
+  async function readOutline(pdf) {
+    let root = null;
+    try { root = await pdf.getOutline(); } catch (e) { return []; }
+    if (!root || !root.length) return [];
+    const out = [];
+    const pageOf = async (dest) => {
+      try {
+        let d = dest;
+        if (typeof d === 'string') d = await pdf.getDestination(d);
+        if (!Array.isArray(d) || !d[0]) return null;
+        const idx = await pdf.getPageIndex(d[0]);
+        return idx + 1;
+      } catch (e) { return null; }
+    };
+    const walk = async (items, level) => {
+      for (const it of items) {
+        out.push({ title: String(it.title || '(无标题)').trim(), level, page: await pageOf(it.dest) });
+        if (it.items && it.items.length) await walk(it.items, level + 1);
+      }
+    };
+    await walk(root, 0);
+    return out;
+  }
+
   async function pickImage(file) {
     try {
       const img = await loadImageFile(file);
+      const url = imageToDataUrl(img, 1800, 0.88);
+      const c = document.createElement('canvas');
+      c.width = img.naturalWidth;
+      c.height = img.naturalHeight;
+      c.getContext('2d').drawImage(img, 0, 0);
+      st.outline = [];
       setPages([{
-        bg: imageToDataUrl(img, 1800, 0.88), strokes: [],
+        bg: url, strokes: [], thumb: makeThumb(c),
         iw: img.naturalWidth, ih: img.naturalHeight, paras: [], chars: 0,
       }], 'image', file.name);
       $('annotStatus').textContent = '已载入图片，可以直接写';
@@ -107,12 +170,14 @@ export function initAnnot() {
 
         pages.push({
           bg: c.toDataURL('image/jpeg', 0.85), strokes: [],
-          iw: vp.width, ih: vp.height, paras, chars,
+          thumb: makeThumb(c), iw: vp.width, ih: vp.height, paras, chars,
         });
         $('annotStatus').textContent = `正在解析 PDF… ${i}/${pdf.numPages}`;
       }
+      st.outline = await readOutline(pdf);
       setPages(pages, 'pdf', file.name);
-      $('annotStatus').textContent = `已载入 ${pages.length} 页（${withText} 页有文字层），可以直接写`;
+      $('annotStatus').textContent = `已载入 ${pages.length} 页（${withText} 页有文字层）`
+        + (st.outline.length ? `，目录 ${st.outline.length} 条` : '') + '，可以直接写';
     } catch (e) {
       $('annotStatus').textContent = 'PDF 打开失败：' + (e.message || e);
     }
@@ -204,11 +269,206 @@ export function initAnnot() {
   $('annotPickPdf').onclick = () => { $('annotFilePdf').value = ''; $('annotFilePdf').click(); };
   $('annotFilePdf').onchange = () => pickPdf($('annotFilePdf').files && $('annotFilePdf').files[0]);
 
-  /* ---------- 翻页 / 缩放 ---------- */
+  /* ---------- 工具栏 ---------- */
+  const colorsEl = $('annotColors');
+  COLORS.forEach((c, i) => {
+    const b = document.createElement('button');
+    b.className = 'sw' + (i === 0 ? ' on' : '');
+    b.style.background = c;
+    b.dataset.color = c;
+    b.title = c === '#ffffff' ? '白色（当橡皮擦白底）' : c;
+    b.onclick = () => {
+      board.color = c;
+      colorsEl.querySelectorAll('.sw').forEach((x) => x.classList.toggle('on', x === b));
+      if (board.tool === 'er' || board.tool === 'del' || board.tool === 'pan') setTool('pen');
+    };
+    colorsEl.appendChild(b);
+  });
+
+  function setTool(t) {
+    st.aTool = t;
+    board.tool = t;
+    document.querySelectorAll('#annotTools [data-atool]').forEach((b) => {
+      b.classList.toggle('on', b.dataset.atool === t);
+    });
+    $('annotStage').classList.toggle('grab', t === 'pan');
+    $('annotStage').classList.toggle('delmode', t === 'del');
+  }
+  document.querySelectorAll('#annotTools [data-atool]').forEach((b) => {
+    b.onclick = () => setTool(b.dataset.atool);
+  });
+  document.querySelectorAll('#annotSizes [data-asize]').forEach((b) => {
+    b.onclick = () => {
+      board.size = Number(b.dataset.asize);
+      document.querySelectorAll('#annotSizes [data-asize]').forEach((x) => x.classList.toggle('on', x === b));
+    };
+  });
+  $('annotUndo').onclick = () => {
+    if (!board.undoStack.length) { $('annotStatus').textContent = '没有可撤销的操作'; return; }
+    board.undo();
+  };
+  $('annotRedo').onclick = () => {
+    if (!board.redoStack.length) { $('annotStatus').textContent = '没有可重做的操作'; return; }
+    board.redo();
+  };
+  $('annotClearPage').onclick = () => {
+    if (!board.strokes.length) { $('annotStatus').textContent = '本页还没有笔迹'; return; }
+    if (!confirm('清空本页所有笔迹？（清空后可以按 ↶ 撤销）')) return;
+    board.clear();
+    $('annotStatus').textContent = '已清空本页笔迹，↶ 可撤销';
+  };
+
+  /* ---------- 翻页 / 缩放 / 平移 ---------- */
+  const stageEl = $('annotStage');
   $('annotPrev').onclick = () => { if (st.idx > 0) showPage(st.idx - 1); };
   $('annotNext').onclick = () => { if (st.idx < st.pages.length - 1) showPage(st.idx + 1); };
-  $('annotZoomIn').onclick = () => { st.zoom = Math.min(3, st.zoom + 0.15); board.setZoom(st.zoom); $('annotZoomInfo').textContent = Math.round(st.zoom * 100) + '%'; };
-  $('annotZoomOut').onclick = () => { st.zoom = Math.max(0.4, st.zoom - 0.15); board.setZoom(st.zoom); $('annotZoomInfo').textContent = Math.round(st.zoom * 100) + '%'; };
+
+  function paintZoom() { $('annotZoomInfo').textContent = Math.round(st.zoom * 100) + '%'; }
+
+  /* 以 (cx, cy) 为锚点缩放：缩放前后让这个点在屏幕上不动 */
+  function setZoom(z, cx, cy) {
+    if (!st.pages.length) return;
+    const r = stageEl.getBoundingClientRect();
+    const px = cx == null ? r.width / 2 : cx - r.left;
+    const py = cy == null ? r.height / 2 : cy - r.top;
+    const before = board.paper.clientWidth || 1;
+    st.zoom = Math.min(5, Math.max(0.3, z));
+    board.setZoom(st.zoom);
+    const after = board.paper.clientWidth || 1;
+    const k = after / before;
+    stageEl.scrollLeft = (stageEl.scrollLeft + px) * k - px;
+    stageEl.scrollTop = (stageEl.scrollTop + py) * k - py;
+    paintZoom();
+  }
+
+  $('annotZoomIn').onclick = () => setZoom(st.zoom + 0.15);
+  $('annotZoomOut').onclick = () => setZoom(st.zoom - 0.15);
+  $('annotZoomFit').onclick = () => {
+    st.zoom = 1;
+    board.setZoom(1);
+    stageEl.scrollTo({ left: 0, top: 0 });
+    paintZoom();
+  };
+
+  stageEl.addEventListener('wheel', (e) => {
+    if (!st.pages.length) return;
+    e.preventDefault();
+    setZoom(st.zoom * (e.deltaY < 0 ? 1.12 : 1 / 1.12), e.clientX, e.clientY);
+  }, { passive: false });
+
+  const ptrs = new Map();
+  let panState = null;
+  let pinchState = null;
+
+  stageEl.addEventListener('pointerdown', (e) => {
+    if (!st.pages.length) return;
+    ptrs.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (ptrs.size === 2) {
+      const [a, b] = [...ptrs.values()];
+      pinchState = { d0: Math.hypot(a.x - b.x, a.y - b.y), z0: st.zoom };
+      panState = null;
+      stageEl.classList.remove('panning');
+      return;
+    }
+    if (st.aTool === 'pan' && ptrs.size === 1) {
+      panState = { x: e.clientX, y: e.clientY, l: stageEl.scrollLeft, t: stageEl.scrollTop };
+      stageEl.classList.add('panning');
+      try { stageEl.setPointerCapture(e.pointerId); } catch (err) { /* 合成事件 */ }
+    }
+  });
+
+  stageEl.addEventListener('pointermove', (e) => {
+    if (ptrs.has(e.pointerId)) ptrs.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (panState) {
+      stageEl.scrollLeft = panState.l - (e.clientX - panState.x);
+      stageEl.scrollTop = panState.t - (e.clientY - panState.y);
+      return;
+    }
+    if (pinchState && ptrs.size === 2) {
+      const [a, b] = [...ptrs.values()];
+      const d = Math.hypot(a.x - b.x, a.y - b.y);
+      if (pinchState.d0 > 12) setZoom(pinchState.z0 * d / pinchState.d0, (a.x + b.x) / 2, (a.y + b.y) / 2);
+    }
+  });
+
+  const endPtr = (e) => {
+    ptrs.delete(e.pointerId);
+    if (ptrs.size < 2) pinchState = null;
+    if (ptrs.size === 0) { panState = null; stageEl.classList.remove('panning'); }
+  };
+  stageEl.addEventListener('pointerup', endPtr);
+  stageEl.addEventListener('pointercancel', endPtr);
+
+  /* 键盘：Ctrl+Z 撤销 / Ctrl+Shift+Z 重做（只在批注页可见时生效） */
+  window.addEventListener('keydown', (e) => {
+    const view = $('view-annot');
+    if (!view || view.hidden) return;
+    if (!(e.ctrlKey || e.metaKey) || e.key.toLowerCase() !== 'z') return;
+    e.preventDefault();
+    if (e.shiftKey) board.redo(); else board.undo();
+  });
+
+  /* 页码跳转 */
+  function jumpTo(v) {
+    const n = Math.round(Number(v));
+    if (!n || n < 1 || n > st.pages.length) {
+      $('annotStatus').textContent = `页码要在 1 ~ ${st.pages.length} 之间`;
+      $('annotJump').value = String(st.idx + 1);
+      return;
+    }
+    showPage(n - 1);
+    markToc();
+  }
+  $('annotJump').onchange = () => jumpTo($('annotJump').value);
+  $('annotJump').onkeydown = (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); jumpTo($('annotJump').value); $('annotJump').blur(); }
+  };
+
+  /* ---------- 目录 / 缩略图 ---------- */
+  function markToc() {
+    document.querySelectorAll('#tocThumbs .toc-thumb').forEach((b) => {
+      b.classList.toggle('on', Number(b.dataset.i) === st.idx);
+    });
+    const cur = document.querySelector('#tocThumbs .toc-thumb.on');
+    if (cur) cur.scrollIntoView({ block: 'nearest' });
+  }
+
+  function renderToc() {
+    const ol = $('tocOutline');
+    const th = $('tocThumbs');
+    ol.innerHTML = '';
+    th.innerHTML = '';
+    if (!st.pages.length) {
+      ol.innerHTML = '<div class="ph">先导入 PDF 或图片。</div>';
+      return;
+    }
+    if (!st.outline.length) {
+      ol.innerHTML = '<div class="ph">这份文档没有书签目录，用右边的缩略图跳页。</div>';
+    } else {
+      st.outline.forEach((it) => {
+        const b = document.createElement('button');
+        b.className = 'toc-item';
+        b.style.paddingLeft = (8 + Math.min(6, it.level) * 14) + 'px';
+        b.textContent = it.title;
+        if (!it.page) { b.disabled = true; b.title = '这条书签没有指向具体页码'; }
+        else b.onclick = () => { showPage(it.page - 1); markToc(); };
+        ol.appendChild(b);
+      });
+    }
+    st.pages.forEach((p, i) => {
+      const b = document.createElement('button');
+      b.className = 'toc-thumb' + (i === st.idx ? ' on' : '');
+      b.dataset.i = String(i);
+      const src = p.thumb || p.bg || '';
+      b.innerHTML = `<img alt="" src="${src}"><span>${i + 1}</span>`;
+      b.onclick = () => { showPage(i); markToc(); };
+      th.appendChild(b);
+    });
+    markToc();
+  }
+
+  $('annotTocOpen').onclick = () => { renderToc(); $('dlgToc').showModal(); };
+  $('tocClose').onclick = () => $('dlgToc').close();
 
   /* ---------- 本页文字 ---------- */
   function renderText() {
@@ -362,7 +622,7 @@ export function initAnnot() {
     if (!st.pages.length) return;
     const data = {
       app: 'KY-notebook', version: 1, kind: st.kind,
-      pages: st.pages.map((p, i) => ({ no: i, w: 1414, h: 1000, strokes: p.strokes || [] })),
+      pages: st.pages.map((p, i) => ({ no: i, w: p.pageW || PAGE_W, h: p.pageH || PAGE_H, strokes: p.strokes || [] })),
     };
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
     const a = document.createElement('a');
@@ -371,6 +631,28 @@ export function initAnnot() {
     a.click();
     setTimeout(() => URL.revokeObjectURL(a.href), 3000);
   };
+
+  /* 批注页坐标 → 笔记本页坐标：笔记本页固定 1414×1000，底图按 contain 居中，
+     所以笔迹要按同一套 contain 变换过去，否则存成笔记后笔迹会和底图错位 */
+  function strokesToNotePage(p, strokes) {
+    const iw = p.iw || PAGE_W;
+    const ih = p.ih || PAGE_H;
+    const pw = p.pageW || iw;
+    const ph = p.pageH || ih;
+    const k2 = Math.min(PAGE_W / iw, PAGE_H / ih);
+    const ox = (PAGE_W - iw * k2) / 2;
+    const oy = (PAGE_H - ih * k2) / 2;
+    const sx = (iw / pw) * k2;
+    const sy = (ih / ph) * k2;
+    const kw = (sx + sy) / 2;
+    return (strokes || []).map((s2) => {
+      const pts = [];
+      for (let i = 0; i + 2 < s2.pts.length; i += 3) {
+        pts.push(ox + s2.pts[i] * sx, oy + s2.pts[i + 1] * sy, s2.pts[i + 2]);
+      }
+      return { ...s2, w: Math.max(0.6, (s2.w || 4) * kw), pts };
+    });
+  }
 
   /* ---------- 存为笔记（带来源锚定） ---------- */
   $('annotToNote').onclick = async () => {
@@ -384,7 +666,7 @@ export function initAnnot() {
     const page = st.idx + 1;
     const base = name.replace(/\.[^.]+$/, '') || (kind === 'pdf' ? 'PDF 批注' : '图片批注');
     const title = st.pages.length > 1 ? `${base} p${page}` : base;
-    await sink.addBgPage(p.bg, title, { kind, name, page }, p.strokes);
+    await sink.addBgPage(p.bg, title, { kind, name, page }, strokesToNotePage(p, p.strokes));
     document.querySelector('.tab[data-tab="ink"]').click();
     if (sink.toast) sink.toast(`已存为笔记「${title}」`);
     $('annotStatus').textContent = '已存进笔记本（带来源）';

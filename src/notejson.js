@@ -16,6 +16,32 @@ const SRC_KINDS = ['pdf', 'img', 'shot'];
 
 const bad = (error) => ({ ok: false, error });
 
+/* 页面元素：image 只认 data:image（不读外链，避免导入时联网/被追踪）；text 必须非空 */
+function readItems(raw) {
+  if (!Array.isArray(raw)) return [];
+  const out = [];
+  for (const it of raw) {
+    if (!it || typeof it !== 'object') continue;
+    const num = (v, d) => (typeof v === 'number' && isFinite(v) ? v : d);
+    const base = {
+      id: typeof it.id === 'string' ? it.id : 'it' + out.length,
+      x: num(it.x, 0), y: num(it.y, 0),
+      w: Math.max(20, num(it.w, 300)), h: Math.max(20, num(it.h, 200)),
+      z: it.z === 'above' ? 'above' : 'below',
+    };
+    if (it.type === 'image' && typeof it.src === 'string' && BG_RE.test(it.src)) {
+      out.push({ ...base, type: 'image', src: it.src });
+    } else if (it.type === 'text' && typeof it.text === 'string' && it.text.trim()) {
+      out.push({
+        ...base, type: 'text', text: it.text.slice(0, 4000),
+        size: Math.min(160, Math.max(8, num(it.size, 32))),
+        color: COLOR_RE.test(String(it.color)) ? it.color : '#1f1c18',
+      });
+    }
+  }
+  return out;
+}
+
 /** 只保留认识的来源字段；不合法就当没有 */
 function readSrc(n) {
   const s = n && typeof n === 'object' ? n.src : null;
@@ -99,6 +125,7 @@ export function parseNoteJson(text) {
       no: pages.length,
       template: TEMPLATES.includes(pg.template) ? pg.template : 'blank',
       strokes,
+      items: readItems(pg.items),
       /* 只有 data:image 的字符串才算底图；老文件的 bg:true/false 一律当没有 */
       bg: typeof pg.bg === 'string' && BG_RE.test(pg.bg) ? pg.bg : null,
     });

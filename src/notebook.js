@@ -1,6 +1,6 @@
 /* 笔记本：笔记库 + 编辑器 */
 import { store, uid, fmtTime } from './store.js';
-import { InkBoard, COLORS, SIZES } from './inkboard.js';
+import { InkBoard, PAGE_W, PAGE_H, COLORS, SIZES, imageToDataUrl, loadImageFile } from './inkboard.js';
 import { buildNoteJson, parseNoteJson } from './notejson.js';
 import { mdInto } from './md.js';
 
@@ -58,10 +58,7 @@ export function initNotebook() {
 
   document.querySelectorAll('.tool[data-tool]').forEach((b) => {
     b.onclick = () => {
-      st.tool = b.dataset.tool;
-      board.tool = st.tool;
-      const stage0 = $('inkStage');
-      if (stage0) stage0.classList.toggle('grab', st.tool === 'pan');
+      setTool(b.dataset.tool);
       document.querySelectorAll('.tool[data-tool]').forEach((x) => x.classList.remove('on'));
       b.classList.add('on');
     };
@@ -79,7 +76,12 @@ export function initNotebook() {
     saveSoon(true);
   };
 
-  board.onChange = () => saveSoon(false);
+  board.onChange = () => {
+    /* 实时同步回内存里的页对象：导出 JSON / 存笔记 / 缩略图都读它，等 700ms 防抖太晚 */
+    const cur = st.pages[st.idx];
+    if (cur) cur.strokes = board.getStrokes();
+    saveSoon(false);
+  };
 
   /* ---------- 画布缩放 / 拖拽平移 ---------- */
   const stageEl = $('inkStage');
@@ -167,6 +169,282 @@ export function initNotebook() {
   stageEl.addEventListener('pointerup', endPointer);
   stageEl.addEventListener('pointercancel', endPointer);
 
+  /* ---------- 页面元素：插入的图片 / 文字 ---------- */
+  const layerBelow = $('inkItemsBelow');
+  const layerAbove = $('inkItemsAbove');
+  let selId = null;
+  let editingId = null;
+
+  const pageNow = () => st.pages[st.idx];
+
+  function setTool(t) {
+    st.tool = t;
+    board.tool = t;
+    document.querySelectorAll('#inkTools [data-tool]').forEach((b) => {
+      b.classList.toggle('on', b.dataset.tool === t);
+    });
+    $('inkStage').classList.toggle('grab', t === 'pan');
+    $('inkStage').classList.toggle('selecting', t === 'sel');
+    if (t !== 'sel') { selId = null; renderItems(); }
+  }
+
+  /* 元素层是 1414×1000 的页面坐标系，整体缩放跟纸面对齐，缩放/转屏都不用重算每个元素 */
+  function syncItemsScale() {
+    const k = (board.paper.clientWidth || PAGE_W) / PAGE_W;
+    layerBelow.style.transform = `scale(${k})`;
+    layerAbove.style.transform = `scale(${k})`;
+  }
+  if (window.ResizeObserver) new ResizeObserver(syncItemsScale).observe(board.paper);
+
+  function placeItem(el, it) {
+    el.style.left = it.x + 'px';
+    el.style.top = it.y + 'px';
+    el.style.width = it.w + 'px';
+    if (it.type === 'image') el.style.height = it.h + 'px';
+  }
+
+  function renderItems() {
+    layerBelow.innerHTML = '';
+    layerAbove.innerHTML = '';
+    const p = pageNow();
+    if (!p) return;
+    if (!Array.isArray(p.items)) p.items = [];
+    board.items = p.items;
+    p.items.forEach((it) => {
+      const el = document.createElement('div');
+      el.className = 'it it-' + it.type + (it.id === selId ? ' on' : '');
+      el.dataset.id = it.id;
+      placeItem(el, it);
+      if (it.type === 'image') {
+        const img = document.createElement('img');
+        img.src = it.src;
+        img.alt = '';
+        img.draggable = false;
+        el.appendChild(img);
+      } else {
+        const tx = document.createElement('div');
+        tx.className = 'tx';
+        tx.style.fontSize = (it.size || 32) + 'px';
+        tx.style.color = it.color || '#1f1c18';
+        tx.textContent = it.text || '';
+        el.appendChild(tx);
+      }
+      const del = document.createElement('button');
+      del.className = 'it-del';
+      del.title = '删除这个元素';
+      del.textContent = '✕';
+      del.onclick = (e) => { e.stopPropagation(); removeItem(it.id); };
+      el.appendChild(del);
+      if (it.type === 'image') {
+        const rs = document.createElement('div');
+        rs.className = 'it-rs';
+        rs.title = '拖动改大小';
+        rs.addEventListener('pointerdown', (e) => startResize(e, it, el));
+        el.appendChild(rs);
+      }
+      el.addEventListener('pointerdown', (e) => startDrag(e, it, el));
+      el.addEventListener('dblclick', (e) => {
+        e.stopPropagation();
+        if (it.type === 'text') openTextDialog(it);
+      });
+      (it.z === 'above' ? layerAbove : layerBelow).appendChild(el);
+    });
+    syncItemsScale();
+  }
+
+  function pickItem(id) {
+    selId = id;
+    document.querySelectorAll('.ink-items .it').forEach((x) => {
+      x.classList.toggle('on', x.dataset.id === id);
+    });
+  }
+
+  function startDrag(e, it, el) {
+    if (st.tool !== 'sel') return;      /* 写字时不该拖到元素 */
+    e.preventDefault();
+    e.stopPropagation();
+    pickItem(it.id);
+    const k = (board.paper.clientWidth || PAGE_W) / PAGE_W;
+    const s0 = { x: e.clientX, y: e.clientY, ox: it.x, oy: it.y };
+    const move = (ev) => {
+      it.x = Math.round(s0.ox + (ev.clientX - s0.x) / k);
+      it.y = Math.round(s0.oy + (ev.clientY - s0.y) / k);
+      el.style.left = it.x + 'px';
+      el.style.top = it.y + 'px';
+    };
+    const up = () => {
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+      saveSoon(true);
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+  }
+
+  function startResize(e, it, el) {
+    e.preventDefault();
+    e.stopPropagation();
+    pickItem(it.id);
+    const k = (board.paper.clientWidth || PAGE_W) / PAGE_W;
+    const s0 = { x: e.clientX, y: e.clientY, w: it.w, h: it.h };
+    const move = (ev) => {
+      it.w = Math.max(40, Math.round(s0.w + (ev.clientX - s0.x) / k));
+      it.h = Math.max(40, Math.round(s0.h + (ev.clientY - s0.y) / k));
+      el.style.width = it.w + 'px';
+      el.style.height = it.h + 'px';
+    };
+    const up = () => {
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+      saveSoon(true);
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+  }
+
+  function removeItem(id) {
+    const p = pageNow();
+    if (!p || !Array.isArray(p.items)) return;
+    p.items = p.items.filter((x) => x.id !== id);
+    if (selId === id) selId = null;
+    renderItems();
+    saveSoon(true);
+    toast('已删除元素');
+  }
+
+  function openTextDialog(it) {
+    editingId = it ? it.id : null;
+    $('textTitle').textContent = it ? '编辑文字' : '插入文字';
+    $('textInput').value = it ? (it.text || '') : '';
+    $('textSize').value = String(it ? (it.size || 32) : 32);
+    $('textColor').value = (it && it.color) || '#1f1c18';
+    $('dlgText').showModal();
+    setTimeout(() => $('textInput').focus(), 30);
+  }
+
+  $('inkAddText').onclick = () => {
+    if (!st.note || st.mode === 'md') return;
+    openTextDialog(null);
+  };
+  $('textCancel').onclick = () => { editingId = null; $('dlgText').close(); };
+  $('textOk').onclick = () => {
+    const txt = $('textInput').value;
+    const size = Math.max(12, Math.min(160, Number($('textSize').value) || 32));
+    const color = $('textColor').value || '#1f1c18';
+    const p = pageNow();
+    if (!txt.trim() || !p) { editingId = null; $('dlgText').close(); return; }
+    if (!Array.isArray(p.items)) p.items = [];
+    if (editingId) {
+      const it = p.items.find((x) => x.id === editingId);
+      if (it) { it.text = txt; it.size = size; it.color = color; }
+    } else {
+      p.items.push({
+        id: uid('it'), type: 'text', z: 'above', text: txt, size, color,
+        x: Math.round(PAGE_W * 0.1), y: Math.round(PAGE_H * 0.12), w: Math.round(PAGE_W * 0.8), h: 120,
+      });
+    }
+    editingId = null;
+    $('dlgText').close();
+    renderItems();
+    saveSoon(true);
+    setTool('sel');
+  };
+
+  $('inkAddImage').onclick = () => {
+    if (!st.note || st.mode === 'md') return;
+    $('inkFileImage').value = '';
+    $('inkFileImage').click();
+  };
+  $('inkFileImage').onchange = async () => {
+    const f = $('inkFileImage').files && $('inkFileImage').files[0];
+    if (!f) return;
+    try {
+      const img = await loadImageFile(f);
+      const url = imageToDataUrl(img, 1400, 0.86);
+      const w = Math.round(PAGE_W * 0.46);
+      const h = Math.round(w * (img.naturalHeight / Math.max(1, img.naturalWidth)));
+      const p = pageNow();
+      if (!p) return;
+      if (!Array.isArray(p.items)) p.items = [];
+      p.items.push({
+        id: uid('it'), type: 'image', z: 'below', src: url,
+        x: Math.round((PAGE_W - w) / 2), y: Math.round((PAGE_H - h) / 2), w, h,
+      });
+      renderItems();
+      saveSoon(true);
+      setTool('sel');
+      toast('图片已插入：切到「↖」可拖动、右下角改大小');
+    } catch (e) {
+      toast('插入失败：' + (e.message || e), true);
+    }
+  };
+
+  /* 插入 PDF：每页转成图片追加成新的一页，可以直接在上面写；不影响已有页 */
+  $('inkAddPdf').onclick = () => {
+    if (!st.note || st.mode === 'md') return;
+    $('inkFilePdf').value = '';
+    $('inkFilePdf').click();
+  };
+  $('inkFilePdf').onchange = async () => {
+    const f = $('inkFilePdf').files && $('inkFilePdf').files[0];
+    if (!f) return;
+    const lib = window.pdfjsLib;
+    if (!lib) { toast('pdf.js 还没加载好（需要联网一次）', true); return; }
+    toast('正在导入 PDF…');
+    try {
+      const buf = await f.arrayBuffer();
+      const pdf = await lib.getDocument({ data: new Uint8Array(buf) }).promise;
+      await saveNow();
+      const id = st.note.id;
+      const base = st.pages.length;
+      for (let i = 1; i <= pdf.numPages; i++) {
+        const page = await pdf.getPage(i);
+        const vp0 = page.getViewport({ scale: 1 });
+        const scale = Math.min(2, 1600 / vp0.width);
+        const vp = page.getViewport({ scale });
+        const c = document.createElement('canvas');
+        c.width = Math.round(vp.width);
+        c.height = Math.round(vp.height);
+        const ctx = c.getContext('2d');
+        ctx.fillStyle = '#fff';
+        ctx.fillRect(0, 0, c.width, c.height);
+        await page.render({ canvasContext: ctx, viewport: vp }).promise;
+        const url = c.toDataURL('image/jpeg', 0.82);
+        const pg = { no: base + i - 1, template: 'blank', strokes: [], items: [], bg: url };
+        st.pages.push(pg);
+        await store.putPage({
+          id: `${id}#${pg.no}`, noteId: id, no: pg.no,
+          template: 'blank', strokes: [], items: [], bg: url,
+        });
+      }
+      st.note.pageCount = st.pages.length;
+      st.note.updatedAt = Date.now();
+      await store.putNote({ ...st.note });
+      loadPage(base);
+      renderLib();
+      toast(`已插入 ${pdf.numPages} 页 PDF，可以直接在上面写`);
+    } catch (e) {
+      toast('PDF 导入失败：' + (e.message || e), true);
+    }
+  };
+
+  /* 选择工具下点空白取消选中；Delete / Backspace 删掉选中的元素 */
+  $('inkStage').addEventListener('pointerdown', (e) => {
+    if (st.tool === 'sel' && !e.target.closest('.it') && selId) {
+      selId = null;
+      renderItems();
+    }
+  });
+  window.addEventListener('keydown', (e) => {
+    if (!st.note || st.mode === 'md' || st.tool !== 'sel' || !selId) return;
+    const tag = (e.target.tagName || '').toLowerCase();
+    if (tag === 'input' || tag === 'textarea') return;
+    if (e.key === 'Delete' || e.key === 'Backspace') {
+      e.preventDefault();
+      removeItem(selId);
+    }
+  });
+
   /* ---------- 保存 ---------- */
   function saveSoon(force) {
     clearTimeout(st.saveT);
@@ -197,6 +475,7 @@ export function initNotebook() {
       no: page.no,
       template: page.template,
       strokes: page.strokes,
+      items: page.items || [],
       bg: page.bg || null,
     });
     st.note.pageCount = st.pages.length;
@@ -224,7 +503,10 @@ export function initNotebook() {
   function loadPage(i) {
     st.idx = Math.max(0, Math.min(st.pages.length - 1, i));
     const p = st.pages[st.idx];
-    board.loadPage({ template: p.template, bg: p.bg, strokes: p.strokes });
+    if (!Array.isArray(p.items)) p.items = [];
+    selId = null;
+    board.loadPage({ template: p.template, bg: p.bg, strokes: p.strokes, items: p.items });
+    renderItems();
     tplSel.value = p.template || 'blank';
     pageInfo.textContent = `第 ${st.idx + 1} / ${st.pages.length} 页`;
   }
@@ -233,7 +515,7 @@ export function initNotebook() {
   $('inkNext').onclick = () => { if (st.idx < st.pages.length - 1) { saveNow(); loadPage(st.idx + 1); } };
   $('inkAddPage').onclick = async () => {
     await saveNow();
-    st.pages.push({ no: st.pages.length, template: 'blank', strokes: [], bg: null });
+    st.pages.push({ no: st.pages.length, template: 'blank', strokes: [], items: [], bg: null });
     loadPage(st.pages.length - 1);
     saveSoon(true);
   };
@@ -318,8 +600,10 @@ export function initNotebook() {
     $('inkExportPng').hidden = false;
     $('inkToMap').hidden = !n.src;
     st.pages = pages.length ? pages.map((p) => ({
-      no: p.no, template: p.template || 'blank', strokes: p.strokes || [], bg: p.bg || null,
-    })) : [{ no: 0, template: 'blank', strokes: [], bg: null }];
+      no: p.no, template: p.template || 'blank', strokes: p.strokes || [],
+      items: Array.isArray(p.items) ? p.items : [],   /* 重开笔记要带上插入的图片/文字 */
+      bg: p.bg || null,
+    })) : [{ no: 0, template: 'blank', strokes: [], items: [], bg: null }];
     st.pages.sort((a, b) => a.no - b.no);
     st.idx = 0;
     titleEl.value = n.title || '未命名笔记';
@@ -368,7 +652,7 @@ export function initNotebook() {
       createdAt: Date.now(), updatedAt: Date.now(), pageCount: 1, thumb: '',
     };
     await store.putNote(note);
-    await store.putPage({ id: `${id}#0`, noteId: id, no: 0, template: 'blank', strokes: [], bg: withBg || null });
+    await store.putPage({ id: `${id}#0`, noteId: id, no: 0, template: 'blank', strokes: [], items: [], bg: withBg || null });
     await openNote(id);
   }
 

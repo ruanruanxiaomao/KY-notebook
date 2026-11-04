@@ -1,5 +1,6 @@
 /* 手写画板引擎：页面坐标固定 W×H，canvas 只负责显示
    - 笔画数据结构：{ t:'pen'|'hl'|'er', c, w, pts:[x,y,p, x,y,p, ...] }
+   - 工具：pen 笔 / hl 荧光 / er 像素橡皮 / del 整笔删除（点一下就删掉那一笔，Xournal++ 的 delete stroke）
    - 撤销/重做是「笔画数组快照」，橡皮也当作一种笔画重放
    - 模板平时只影响纸面背景（CSS），不画进 canvas；导出 PNG 时由 _paintTemplate 补画
 */
@@ -16,6 +17,9 @@ export class InkBoard {
     this.stage = stage;
     this.ctx = canvas.getContext('2d');
     this.zoom = opts.zoom || 1;
+    /* 页面坐标系：默认 1414x1000；批注页按 PDF / 图片的版式比例改成竖版，笔迹才不会挤在中间一条 */
+    this.pageW = opts.pageW || PAGE_W;
+    this.pageH = opts.pageH || PAGE_H;
     this.tool = 'pen';
     this.color = COLORS[0];
     this.size = SIZES[1];
@@ -24,6 +28,9 @@ export class InkBoard {
     this.redoStack = [];
     this.bg = null;
     this.template = 'blank';
+    /* 页面元素：{ type:'image'|'text', x,y,w,h, z:'below'|'above', src|text, size, color }
+       屏幕上是 DOM（可拖可删），导出 PNG / 缩略图时由下面的 _paintItems 画进来 */
+    this.items = [];
     this._st = null;
     this._k = 1;      // 页面坐标 → 设备像素
     this._s = 1;      // 页面坐标 → CSS 像素
@@ -45,9 +52,9 @@ export class InkBoard {
     const pad = 28;
     const availW = Math.max(320, this.stage.clientWidth - pad);
     const availH = Math.max(240, this.stage.clientHeight - pad);
-    const s = Math.min(availW / PAGE_W, availH / PAGE_H, 1) * this.zoom;
-    const cssW = Math.round(PAGE_W * s);
-    const cssH = Math.round(PAGE_H * s);
+    const s = Math.min(availW / this.pageW, availH / this.pageH, 1) * this.zoom;
+    const cssW = Math.round(this.pageW * s);
+    const cssH = Math.round(this.pageH * s);
     const dpr = window.devicePixelRatio || 1;
     const bw = Math.round(cssW * dpr);
     const bh = Math.round(cssH * dpr);
@@ -65,13 +72,24 @@ export class InkBoard {
     this.cv.width = bw;
     this.cv.height = bh;
     /* 页面坐标 → 设备像素用真实 backing 尺寸算（避免 round 累积误差） */
-    this._k = bw / PAGE_W;
+    this._k = bw / this.pageW;
     this._s = this._k / dpr;
     this.redraw();
   }
 
   setZoom(z) {
-    this.zoom = Math.min(3, Math.max(0.4, z));
+    this.zoom = Math.min(5, Math.max(0.3, z));
+    this.layout();
+  }
+
+  /* 换页面比例（批注页每页按自己的版式设一次） */
+  setPageSize(w, h) {
+    const W = Math.max(200, Math.round(w || PAGE_W));
+    const H = Math.max(200, Math.round(h || PAGE_H));
+    if (W === this.pageW && H === this.pageH) return;
+    this.pageW = W;
+    this.pageH = H;
+    this._cssW = -1;                 /* 强制重新算尺寸 */
     this.layout();
   }
 
@@ -99,9 +117,10 @@ export class InkBoard {
   }
 
   /* ---------- 页面数据 ---------- */
-  loadPage({ template, bg, strokes } = {}) {
+  loadPage({ template, bg, strokes, items } = {}) {
     this.setTemplate(template || 'blank');
     this.setBg(bg || null);
+    this.items = Array.isArray(items) ? items.map((it) => ({ ...it })) : [];
     this.strokes = Array.isArray(strokes) ? strokes.map((s) => ({ ...s, pts: s.pts.slice() })) : [];
     this.undoStack = [];
     this.redoStack = [];
@@ -158,7 +177,7 @@ export class InkBoard {
     const r = this.cv.getBoundingClientRect();
     /* 用「实际显示宽度 / 页面宽度」换算，而不是缓存下来的 _s：窗口缩放、CSS 变换、dpr 变化时
        缓存的 _s 会和真实显示尺寸脱节，笔迹就会跟不上鼠标（抖动/画歪） */
-    const s = (r.width / PAGE_W) || this._s;
+    const s = (r.width / this.pageW) || this._s;
     const x = (e.clientX - r.left) / s;
     const y = (e.clientY - r.top) / s;
     const p = typeof e.pressure === 'number' && e.pressure > 0 ? e.pressure : 0.5;
@@ -171,6 +190,13 @@ export class InkBoard {
       if (e.button !== undefined && e.button !== 0 && e.pointerType === 'mouse') return;
       e.preventDefault();
       if (this.tool === 'pan') return;     /* 抓手：不在画布上落笔，交给外层做平移 */
+      if (this.tool === 'sel') return;     /* 选择：点的是插入的图片/文字，不落笔 */
+      if (this.tool === 'del') {           /* 整笔删除：点一下删掉命中的那一笔 */
+        this._delOn = true;
+        this._delPushed = false;
+        this.eraseAt(e);
+        return;
+      }
       try { cv.setPointerCapture(e.pointerId); } catch (err) { /* 合成事件会抛，忽略 */ }
       const t = this.tool;
       const st = { t, c: this.color, w: this.size, pts: [] };
@@ -183,6 +209,7 @@ export class InkBoard {
       this._paintStroke(st);
     };
     const move = (e) => {
+      if (this._delOn) { this.eraseAt(e); return; }
       if (!this._st) return;
       e.preventDefault();
       const evs = (typeof e.getCoalescedEvents === 'function' && e.getCoalescedEvents()) || [e];
@@ -200,6 +227,7 @@ export class InkBoard {
       if (added) this.redraw();
     };
     const up = () => {
+      this._delOn = false;
       if (!this._st) return;
       const st = this._st;
       this._st = null;
@@ -212,6 +240,51 @@ export class InkBoard {
     cv.addEventListener('pointerup', up);
     cv.addEventListener('pointercancel', up);
     cv.addEventListener('pointerleave', (e) => { if (this._st && e.pointerType === 'mouse') up(); });
+  }
+
+  /* ---------- 整笔删除 ---------- */
+  /** 命中阈值按「屏幕 10px」换算成页面坐标，放大时更精确 */
+  _hitTol() {
+    const s = this._s || 1;
+    return Math.max(4, 9 / Math.max(0.15, s));
+  }
+
+  /** 把笔画拆成线段，返回点到折线的最短距离 */
+  _distToStroke(st, x, y) {
+    const pts = st.pts;
+    const n = Math.floor(pts.length / 3);
+    if (!n) return Infinity;
+    const tol = (st.w || 4) * (st.t === 'hl' ? 1.6 : 0.6);
+    if (n === 1) return Math.hypot(x - pts[0], y - pts[1]) - tol;
+    let best = Infinity;
+    for (let i = 1; i < n; i++) {
+      const x1 = pts[(i - 1) * 3], y1 = pts[(i - 1) * 3 + 1];
+      const x2 = pts[i * 3], y2 = pts[i * 3 + 1];
+      const dx = x2 - x1, dy = y2 - y1;
+      const len2 = dx * dx + dy * dy;
+      let t = len2 ? ((x - x1) * dx + (y - y1) * dy) / len2 : 0;
+      t = Math.max(0, Math.min(1, t));
+      const d = Math.hypot(x - (x1 + t * dx), y - (y1 + t * dy));
+      if (d < best) best = d;
+    }
+    return best - tol;
+  }
+
+  /** 删掉命中的笔画（可拖动连续删）；一次拖动只记一次撤销 */
+  eraseAt(e) {
+    if (!this.strokes.length) return false;
+    const [x, y] = this._pt(e);
+    const tol = this._hitTol();
+    let hit = -1;
+    for (let i = this.strokes.length - 1; i >= 0; i--) {
+      if (this._distToStroke(this.strokes[i], x, y) <= tol) { hit = i; break; }
+    }
+    if (hit < 0) return false;
+    if (!this._delPushed) { this.pushUndo(); this._delPushed = true; }
+    this.strokes.splice(hit, 1);
+    this.redraw();
+    if (this.onChange) this.onChange();
+    return true;
   }
 
   /* ---------- 撤销 / 重做 ---------- */
@@ -245,9 +318,44 @@ export class InkBoard {
     if (this.onChange) this.onChange();
   }
 
+  /* ---------- 页面元素 ---------- */
+  /** 画一层元素（below 在笔迹下、above 在笔迹上） */
+  async _paintItems(ctx, k, layer) {
+    const list = (this.items || []).filter((it) => (it.z || 'below') === layer);
+    for (const it of list) {
+      if (it.type === 'image' && it.src) {
+        await drawImageFit(ctx, it.src, it.x * k, it.y * k, it.w * k, it.h * k);
+      } else if (it.type === 'text') {
+        this._paintText(ctx, it, k);
+      }
+    }
+  }
+
+  _paintText(ctx, it, k) {
+    const size = Math.max(6, (it.size || 28) * k);
+    const lh = size * 1.55;
+    const maxW = Math.max(10, it.w * k);
+    ctx.save();
+    ctx.font = `${size}px "Kaiti SC","STKaiti",KaiTi,system-ui,sans-serif`;
+    ctx.fillStyle = it.color || '#1f1c18';
+    ctx.textBaseline = 'top';
+    const lines = [];
+    String(it.text || '').split('\n').forEach((par) => {
+      if (!par) { lines.push(''); return; }
+      let cur = '';
+      for (const ch of par) {
+        if (cur && ctx.measureText(cur + ch).width > maxW) { lines.push(cur); cur = ch; }
+        else cur += ch;
+      }
+      lines.push(cur);
+    });
+    lines.forEach((ln, i) => ctx.fillText(ln, it.x * k, it.y * k + i * lh));
+    ctx.restore();
+  }
+
   /* ---------- 导出 ---------- */
   async exportPng(scale = 2) {
-    const W = PAGE_W * scale, H = PAGE_H * scale;
+    const W = this.pageW * scale, H = this.pageH * scale;
     const c = document.createElement('canvas');
     c.width = W; c.height = H;
     const ctx = c.getContext('2d');
@@ -260,6 +368,8 @@ export class InkBoard {
       /* 纸面模板线在屏幕上是 CSS 背景，导出时要补画，否则导出图和屏幕不一致 */
       this._paintTemplate(ctx, W, H, scale);
     }
+    /* 元素要在 identity 变换下画（内部按 k 自己换算），且分上下两层 */
+    await this._paintItems(ctx, scale, 'below');
     ctx.setTransform(scale, 0, 0, scale, 0, 0);
     for (const st of this.strokes) {
       const saveCtx = this.ctx;
@@ -267,6 +377,8 @@ export class InkBoard {
       this._paintStroke(st);
       this.ctx = saveCtx;
     }
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    await this._paintItems(ctx, scale, 'above');
     return c.toDataURL('image/png');
   }
 
@@ -303,13 +415,14 @@ export class InkBoard {
   }
 
   async thumb(maxW = 320) {
-    const s = maxW / PAGE_W;
+    const s = maxW / this.pageW;
     const c = document.createElement('canvas');
-    c.width = maxW; c.height = Math.round(PAGE_H * s);
+    c.width = maxW; c.height = Math.round(this.pageH * s);
     const ctx = c.getContext('2d');
     ctx.fillStyle = '#fff';
     ctx.fillRect(0, 0, c.width, c.height);
     if (this.bg) await drawImageContain(ctx, this.bg, 0, 0, c.width, c.height);
+    await this._paintItems(ctx, s, 'below');
     ctx.setTransform(s, 0, 0, s, 0, 0);
     for (const st of this.strokes) {
       const saveCtx = this.ctx;
@@ -317,6 +430,8 @@ export class InkBoard {
       this._paintStroke(st);
       this.ctx = saveCtx;
     }
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    await this._paintItems(ctx, s, 'above');
     return c.toDataURL('image/jpeg', 0.7);
   }
 }
@@ -338,6 +453,24 @@ export function drawImageContain(ctx, url, x, y, w, h) {
       const iw = img.naturalWidth || 1, ih = img.naturalHeight || 1;
       const k = Math.min(w / iw, h / ih);
       const dw = iw * k, dh = ih * k;
+      ctx.drawImage(img, x + (w - dw) / 2, y + (h - dh) / 2, dw, dh);
+      resolve();
+    };
+    img.onerror = () => resolve();
+    img.src = url;
+  });
+}
+
+/** 按 contain 画进 (x,y,w,h)，元素框变了也不变形 */
+export function drawImageFit(ctx, url, x, y, w, h) {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      const iw = img.naturalWidth || 1;
+      const ih = img.naturalHeight || 1;
+      const k = Math.min(w / iw, h / ih);
+      const dw = iw * k;
+      const dh = ih * k;
       ctx.drawImage(img, x + (w - dw) / 2, y + (h - dh) / 2, dw, dh);
       resolve();
     };

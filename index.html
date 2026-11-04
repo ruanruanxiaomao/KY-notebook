@@ -66,6 +66,7 @@
           <button class="tool" data-tool="hl" title="荧光笔">🖍</button>
           <button class="tool" data-tool="er" title="橡皮">🧽</button>
           <button class="tool" data-tool="pan" title="抓手：拖动平移画布">✋</button>
+          <button class="tool" data-tool="sel" title="选择：点选/拖动插入的图片和文字">↖</button>
         </div>
         <div class="group" id="inkColors"></div>
         <div class="group" id="inkSizes"></div>
@@ -73,6 +74,13 @@
           <button class="tool" id="inkUndo" title="撤销">↶</button>
           <button class="tool" id="inkRedo" title="重做">↷</button>
           <button class="tool" id="inkClear" title="清空本页">⌫</button>
+        </div>
+        <div class="group">
+          <button class="tool" id="inkAddText" title="插入文字块">T</button>
+          <button class="tool" id="inkAddImage" title="插入图片到本页">🖼</button>
+          <button class="tool" id="inkAddPdf" title="插入 PDF（每页追加成新的一页，可直接批注）">📄</button>
+          <input type="file" id="inkFileImage" accept="image/*" hidden>
+          <input type="file" id="inkFilePdf" accept="application/pdf" hidden>
         </div>
         <div class="group">
           <label class="sel">模板
@@ -100,7 +108,9 @@
 
       <div class="stage" id="inkStage">
         <div class="paper" id="inkPaper">
+          <div class="ink-items below" id="inkItemsBelow"></div>
           <canvas id="inkCv"></canvas>
+          <div class="ink-items above" id="inkItemsAbove"></div>
         </div>
       </div>
 
@@ -172,12 +182,19 @@
       <input type="file" id="annotFileImg" accept="image/*" hidden>
       <input type="file" id="annotFilePdf" accept="application/pdf" hidden>
       <div class="row pager">
-        <button class="tool" id="annotPrev">‹</button>
+        <button class="tool" id="annotPrev" title="上一页">‹</button>
         <span id="annotPageInfo">— / —</span>
-        <button class="tool" id="annotNext">›</button>
-        <button class="tool" id="annotZoomOut">−</button>
+        <button class="tool" id="annotNext" title="下一页">›</button>
+        <span class="spacer"></span>
+        <button class="tool" id="annotZoomOut" title="缩小">−</button>
         <span id="annotZoomInfo">100%</span>
-        <button class="tool" id="annotZoomIn">＋</button>
+        <button class="tool" id="annotZoomIn" title="放大">＋</button>
+        <button class="tool" id="annotZoomFit" title="适应窗口">⤢</button>
+      </div>
+      <div class="row">
+        <input class="page-jump" id="annotJump" type="number" min="1" placeholder="跳页…"
+          title="输入页码后按回车">
+        <button class="btn mini" id="annotTocOpen" title="PDF 目录（书签）与页面缩略图">目录 / 页面</button>
       </div>
       <label class="field">AI 解析 / 翻译本页用哪个提示词
         <select id="annotPrompt"></select>
@@ -190,7 +207,7 @@
         <textarea class="custom" id="annotNoteReq" rows="2"
           placeholder="例如：按考点整理成复习提纲，公式用 $…$，每节给出易错点"></textarea>
       </label>
-      <div class="row">
+      <div class="row wrap">
         <select id="annotScope" title="AI 读多少内容">
           <option value="page">只读本页</option>
           <option value="all">读整本（最多 30 页）</option>
@@ -207,6 +224,25 @@
     </div>
 
     <div class="pane right annot-stage-wrap">
+      <div class="ann-tools" id="annotTools">
+        <button class="tool on" data-atool="pen" title="笔">✏️</button>
+        <button class="tool" data-atool="hl" title="荧光笔">🖍</button>
+        <button class="tool" data-atool="er" title="橡皮（擦掉像素）">🧽</button>
+        <button class="tool" data-atool="del" title="删除整笔：点一下删掉那一笔，可按住拖动连续删">✂️</button>
+        <span class="sep"></span>
+        <button class="tool" id="annotUndo" title="撤销（Ctrl+Z）">↶</button>
+        <button class="tool" id="annotRedo" title="重做（Ctrl+Shift+Z）">↷</button>
+        <button class="tool" id="annotClearPage" title="清空本页笔迹">🗑</button>
+        <span class="sep"></span>
+        <button class="tool" data-atool="pan" title="抓手：拖动平移页面">✋</button>
+        <span class="sep"></span>
+        <span class="sw-row" id="annotColors"></span>
+        <div class="seg" id="annotSizes">
+          <button class="s1" data-asize="2" title="细">·</button>
+          <button class="s2 on" data-asize="4" title="中">·</button>
+          <button class="s3" data-asize="7" title="粗">·</button>
+        </div>
+      </div>
       <div class="stage" id="annotStage">
         <div class="paper" id="annotPaper">
           <canvas id="annotBg"></canvas>
@@ -270,6 +306,41 @@
 </main>
 
 <!-- ============ 移动到分组 ============ -->
+<dialog id="dlgText" class="dlg">
+  <div class="dlg-body">
+    <h3 id="textTitle">插入文字</h3>
+    <label class="field">内容
+      <textarea class="custom" id="textInput" rows="5"
+        placeholder="可以多行；插入后切到「↖ 选择」工具就能拖动、改大小、删除"></textarea>
+    </label>
+    <div class="row">
+      <label class="field">字号（页面坐标）
+        <input id="textSize" type="number" min="12" max="160" value="32">
+      </label>
+      <label class="field">颜色
+        <input id="textColor" type="color" value="#1f1c18">
+      </label>
+    </div>
+    <div class="row end">
+      <button class="btn ghost" id="textCancel">取消</button>
+      <button class="btn primary" id="textOk">插入</button>
+    </div>
+  </div>
+</dialog>
+
+<dialog id="dlgToc" class="dlg wide">
+  <div class="dlg-body">
+    <h3>目录 / 页面</h3>
+    <div class="toc-wrap">
+      <div class="toc-outline" id="tocOutline"></div>
+      <div class="toc-thumbs" id="tocThumbs"></div>
+    </div>
+    <div class="row end">
+      <button class="btn ghost" id="tocClose">关闭</button>
+    </div>
+  </div>
+</dialog>
+
 <dialog id="dlgMove" class="dlg">
   <form method="dialog" class="dlg-body">
     <h3>移动到分组</h3>
