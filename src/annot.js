@@ -118,6 +118,21 @@ export function initAnnot() {
     }
   }
 
+  /* 把本页文字送进「思维导图」当素材（跨页签，走 window 上的钩子，不互相 import） */
+  $('annotToMap').onclick = () => {
+    const p = st.pages[st.idx];
+    const text = p && p.paras && p.paras.length
+      ? p.paras.map((x) => x.text).join('\n\n')
+      : '';
+    if (!text.trim()) {
+      $('annotStatus').textContent = '这一页没有文字层，导图没素材可用；可以手动写主题让 AI 展开。';
+      window.__kynbMapFeed && window.__kynbMapFeed('', '');
+      return;
+    }
+    const title = String(st.name || '').replace(/\.pdf$/i, '');
+    if (window.__kynbMapFeed) window.__kynbMapFeed(text, title);
+  };
+
   $('annotPickImg').onclick = () => { $('annotFileImg').value = ''; $('annotFileImg').click(); };
   $('annotFileImg').onchange = () => pickImage($('annotFileImg').files && $('annotFileImg').files[0]);
   $('annotPickPdf').onclick = () => { $('annotFilePdf').value = ''; $('annotFilePdf').click(); };

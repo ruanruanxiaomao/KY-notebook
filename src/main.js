@@ -2,6 +2,7 @@
 import { initNotebook } from './notebook.js';
 import { initShot } from './shot.js';
 import { initAnnot } from './annot.js';
+import { initMap } from './mapview.js';
 import { getCfg, setCfg, listModels } from './ai.js';
 import { getPrompts, setPrompts, resetPrompts, DEFAULT_PROMPTS } from './prompts.js';
 
@@ -12,6 +13,7 @@ const views = {
   ink: $('view-ink'),
   shot: $('view-shot'),
   annot: $('view-annot'),
+  map: $('view-map'),
 };
 document.querySelectorAll('.tab').forEach((b) => {
   b.onclick = () => {
@@ -26,7 +28,8 @@ document.querySelectorAll('.tab').forEach((b) => {
 const notebook = initNotebook();
 const shot = initShot(notebook);
 const annot = initAnnot();
-window.__kynb = { notebook, shot, annot };   /* 调试 / 冒烟测试用 */
+const map = initMap();
+window.__kynb = { notebook, shot, annot, map };   /* 调试 / 冒烟测试用 */
 
 /* ---------- 设置 ---------- */
 const dlgSettings = $('dlgSettings');

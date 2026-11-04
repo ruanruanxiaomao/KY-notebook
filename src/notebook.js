@@ -307,15 +307,80 @@ export function initNotebook() {
     toast(`已导入「${note.title}」：${note.pageCount} 页` + (bgN ? ` · 已恢复 ${bgN} 页底图` : ''));
   };
 
-  /* ---------- 笔记库 ---------- */
-  async function renderLib() {
+  /* ---------- 笔记库（按分组） ---------- */
+  const FOLD_KEY = 'kynb_lib_fold';
+
+  function foldedSet() {
+    try { return new Set(JSON.parse(localStorage.getItem(FOLD_KEY) || '[]')); } catch (e) { return new Set(); }
+  }
+  function saveFold(set) {
+    try { localStorage.setItem(FOLD_KEY, JSON.stringify([...set])); } catch (e) { /* 无痕模式就算了 */ }
+  }
+
+  /* 起名 / 改名：用对话框而不是 prompt()，无头测试和手机上都更稳 */
+  function askName(title, value) {
+    return new Promise((resolve) => {
+      const dlg = $('dlgName');
+      $('nameTitle').textContent = title;
+      $('nameInput').value = value || '';
+      const done = () => {
+        dlg.removeEventListener('close', done);
+        resolve(dlg.returnValue === 'ok' ? $('nameInput').value.trim() : null);
+      };
+      dlg.addEventListener('close', done);
+      dlg.showModal();
+      setTimeout(() => $('nameInput').select(), 30);
+    });
+  }
+
+  async function moveNote(noteId, groupId) {
+    const n = await store.getNote(noteId);
+    if (!n) return;
+    if (groupId) n.groupId = groupId; else delete n.groupId;
+    await store.putNote(n);
+    await renderLib();
+    toast(groupId ? '已移到分组' : '已移出分组');
+  }
+
+  async function removeGroup(id, name) {
     const list = await store.allNotes();
-    libEl.innerHTML = '';
-    emptyEl.hidden = list.length > 0;
-    list.forEach((n) => {
-      const c = document.createElement('div');
-      c.className = 'card';
-      c.innerHTML = `
+    const inside = list.filter((x) => x.groupId === id);
+    if (!confirm(`删除分组「${name}」？` + (inside.length
+      ? `里面的 ${inside.length} 本笔记会回到「未分组」，不会被删掉。` : ''))) return;
+    for (const x of inside) {
+      delete x.groupId;
+      await store.putNote(x);
+    }
+    await store.delGroup(id);
+    await renderLib();
+    toast(`已删除分组「${name}」` + (inside.length ? `，${inside.length} 本回到未分组` : ''));
+  }
+
+  function openMove(n, groups) {
+    const dlg = $('dlgMove');
+    $('moveWho').textContent = `「${n.title || '未命名笔记'}」`;
+    const box = $('moveList');
+    box.innerHTML = '';
+    const add = (gid, name) => {
+      const cur = (n.groupId || '') === gid;
+      const b = document.createElement('button');
+      b.className = 'btn' + (cur ? ' primary' : '');
+      b.type = 'button';
+      b.textContent = (cur ? '✓ ' : '') + name;
+      b.onclick = async () => { dlg.close(); await moveNote(n.id, gid); };
+      box.appendChild(b);
+    };
+    add('', '不分组');
+    groups.forEach((g) => add(g.id, g.name));
+    dlg.showModal();
+  }
+
+  function cardEl(n, groups) {
+    const c = document.createElement('div');
+    c.className = 'card';
+    c.draggable = true;
+    c.dataset.id = n.id;
+    c.innerHTML = `
         <div class="thumb" style="${n.thumb ? `background-image:url('${n.thumb}')` : ''}"></div>
         <div class="meta">
           <div class="name">${escapeHtml(n.title || '未命名笔记')}</div>
@@ -323,20 +388,112 @@ export function initNotebook() {
         </div>
         ${n.src && n.src.kind ? `<div class="src" title="${escapeHtml(srcFull(n.src))}">${escapeHtml(srcBadge(n.src))}</div>` : ''}
         ${n.star ? '<div class="star">★</div>' : ''}
+        <button class="mv" title="移动到分组">📁</button>
         <button class="x" title="删除">✕</button>`;
-      c.onclick = (e) => {
-        if (e.target.classList.contains('x')) return;
-        openNote(n.id);
-      };
-      c.querySelector('.x').onclick = async (e) => {
+    c.onclick = (e) => {
+      if (e.target.closest('button')) return;
+      openNote(n.id);
+    };
+    c.querySelector('.x').onclick = async (e) => {
+      e.stopPropagation();
+      if (!confirm(`删除「${n.title || '未命名笔记'}」？`)) return;
+      await store.delNote(n.id);
+      renderLib();
+    };
+    c.querySelector('.mv').onclick = (e) => {
+      e.stopPropagation();
+      openMove(n, groups);
+    };
+    c.addEventListener('dragstart', (e) => {
+      e.dataTransfer.setData('text/plain', n.id);
+      e.dataTransfer.effectAllowed = 'move';
+      c.classList.add('dragging');
+    });
+    c.addEventListener('dragend', () => c.classList.remove('dragging'));
+    return c;
+  }
+
+  function groupHead(g, isLoose) {
+    const key = isLoose ? '@loose' : g.id;
+    const fold = foldedSet();
+    const open = !fold.has(key);
+    const d = document.createElement('div');
+    d.className = 'grp';
+    d.dataset.gid = isLoose ? '' : g.id;
+    d.innerHTML = `
+        <span class="car">${open ? '▾' : '▸'}</span>
+        <span class="nm" title="${escapeHtml(g.name)}">${escapeHtml(g.name)}</span>
+        <span class="cnt">${g.count}</span>
+        <span class="acts">${isLoose ? '' : '<button data-act="ren" title="重命名">改名</button><button data-act="del" title="删除分组（不动笔记）">删除</button>'}</span>`;
+    const toggle = () => {
+      const s2 = foldedSet();
+      if (s2.has(key)) s2.delete(key); else s2.add(key);
+      saveFold(s2);
+      renderLib();
+    };
+    d.querySelector('.car').onclick = toggle;
+    d.querySelector('.nm').onclick = toggle;
+    if (!isLoose) {
+      d.querySelector('[data-act="ren"]').onclick = async (e) => {
         e.stopPropagation();
-        if (!confirm(`删除「${n.title || '未命名笔记'}」？`)) return;
-        await store.delNote(n.id);
-        renderLib();
+        const name = await askName('重命名分组', g.name);
+        if (!name) return;
+        await store.putGroup({ ...g, name });
+        await renderLib();
       };
-      libEl.appendChild(c);
+      d.querySelector('[data-act="del"]').onclick = (e) => {
+        e.stopPropagation();
+        removeGroup(g.id, g.name);
+      };
+    }
+    d.addEventListener('dragover', (e) => {
+      if (!e.dataTransfer.types.includes('text/plain')) return;
+      e.preventDefault();
+      d.classList.add('drag');
+    });
+    d.addEventListener('dragleave', () => d.classList.remove('drag'));
+    d.addEventListener('drop', (e) => {
+      e.preventDefault();
+      d.classList.remove('drag');
+      const id = e.dataTransfer.getData('text/plain');
+      if (id) moveNote(id, isLoose ? '' : g.id);
+    });
+    return d;
+  }
+
+  async function renderLib() {
+    const [list, groups] = await Promise.all([store.allNotes(), store.allGroups()]);
+    libEl.innerHTML = '';
+    emptyEl.hidden = list.length > 0;
+    const known = new Set(groups.map((g) => g.id));
+    const loose = list.filter((n) => !n.groupId || !known.has(n.groupId));
+    const fold = foldedSet();
+
+    /* 一个分组都没有：保持原来的平铺，不打扰 */
+    if (!groups.length) {
+      loose.forEach((n) => libEl.appendChild(cardEl(n, groups)));
+      return;
+    }
+
+    if (loose.length) {
+      libEl.appendChild(groupHead({ id: '', name: '未分组', count: loose.length }, true));
+      if (!fold.has('@loose')) loose.forEach((n) => libEl.appendChild(cardEl(n, groups)));
+    }
+    groups.forEach((g) => {
+      const items = list.filter((n) => n.groupId === g.id);
+      libEl.appendChild(groupHead({ ...g, count: items.length }, false));
+      if (!fold.has(g.id)) items.forEach((n) => libEl.appendChild(cardEl(n, groups)));
     });
   }
+
+  $('inkNewGroup').onclick = async () => {
+    const name = await askName('新建分组', '');
+    if (!name) return;
+    const groups = await store.allGroups();
+    await store.putGroup({ id: uid('g'), name, order: groups.length, createdAt: Date.now() });
+    await renderLib();
+    toast(`已建分组「${name}」：把笔记卡片拖到分组标题上，或点卡片右下角 📁`);
+  };
 
   renderLib();
 
@@ -362,6 +519,24 @@ export function initNotebook() {
     return false;
   };
 
+  /* 单独新建一本「一页底图」的笔记（导图页用：导图不该追加到上次打开的那本里） */
+  async function addBgNote(dataUrl, title, src, strokes) {
+    const from = src || { kind: 'shot', name: title || '拍题', page: 1 };
+    const id = uid('note');
+    const note = {
+      id, title: title || '新笔记', kind: from.kind === 'shot' ? 'shot' : 'ink', star: 0, src: from,
+      createdAt: Date.now(), updatedAt: Date.now(), pageCount: 1, thumb: '',
+    };
+    await store.putNote(note);
+    await store.putPage({
+      id: `${id}#0`, noteId: id, no: 0, template: 'blank',
+      strokes: Array.isArray(strokes) ? strokes : [], bg: dataUrl,
+    });
+    await renderLib();
+    await openNote(id);
+    return id;
+  }
+
   /* 拍题 / 批注页「存为笔记」：把一张底图存成一页，并记下来源 */
   async function addBgPage(dataUrl, title, src, strokes) {
     const from = src || { kind: 'shot', name: title || '拍题', page: 1 };
@@ -386,18 +561,19 @@ export function initNotebook() {
     return id;
   }
 
-  const api = { renderLib, newNote, openNote, board, state: st, addBgPage, toast };
+  const api = { renderLib, newNote, openNote, board, state: st, addBgPage, addBgNote, toast };
   noteApi = api;
   return api;
 }
 
-const SRC_ICON = { pdf: '📄', img: '🖼', shot: '📷' };
+const SRC_ICON = { pdf: '📄', img: '🖼', shot: '📷', map: '🧠' };
 const srcIcon = (s) => SRC_ICON[s && s.kind] || '📄';
 
 /** 卡片徽标：📄 文件名 p3 / 🖼 图片名 / 📷 拍题 */
 function srcBadge(src) {
   if (!src || !src.kind) return '';
   if (src.kind === 'shot') return '📷 拍题';
+  if (src.kind === 'map') return `🧠 ${src.name || '思维导图'}`;
   const name = src.name || '未命名';
   return `${srcIcon(src)} ${name}${src.page ? ' p' + src.page : ''}`;
 }
@@ -406,6 +582,7 @@ function srcBadge(src) {
 function srcFull(src) {
   if (!src || !src.kind) return '';
   if (src.kind === 'shot') return '拍题';
+  if (src.kind === 'map') return `思维导图：${src.name || ''}`;
   return `${src.name || '未命名'}${src.page ? ` 第 ${src.page} 页` : ''}`;
 }
 

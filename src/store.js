@@ -1,9 +1,10 @@
-/* 极简 IndexedDB 封装：notes / pages / meta 三个 store
-   notes: { id, title, kind, star, createdAt, updatedAt, pageCount, thumb }
-   pages: { id: `${noteId}#${no}`, noteId, no, template, strokes: [], bg: dataURL|null }
+/* 极简 IndexedDB 封装：notes / pages / groups / meta 四个 store
+   notes:  { id, title, kind, star, createdAt, updatedAt, pageCount, thumb, groupId?, src? }
+   pages:  { id: `${noteId}#${no}`, noteId, no, template, strokes: [], bg: dataURL|null }
+   groups: { id, name, order, createdAt }   —— 单层分组：一本笔记最多属于一个组（Joplin 的 notebook 模型）
 */
 const DB_NAME = 'kynb';
-const DB_VER = 1;
+const DB_VER = 2;
 let dbp = null;
 
 function openDB() {
@@ -19,6 +20,11 @@ function openDB() {
       if (!db.objectStoreNames.contains('pages')) {
         const p = db.createObjectStore('pages', { keyPath: 'id' });
         p.createIndex('noteId', 'noteId');
+      }
+      /* v2：分组。只加新表，已有 notes/pages 原样保留 */
+      if (!db.objectStoreNames.contains('groups')) {
+        const g = db.createObjectStore('groups', { keyPath: 'id' });
+        g.createIndex('order', 'order');
       }
       if (!db.objectStoreNames.contains('meta')) db.createObjectStore('meta', { keyPath: 'k' });
     };
@@ -81,9 +87,27 @@ export const store = {
     const list = await this.pagesOf(noteId);
     await Promise.all(list.map((p) => tx('pages', 'readwrite', (s) => s.delete(p.id))));
   },
+  /* ---------- 分组 ---------- */
+  async allGroups() {
+    const db = await openDB();
+    return new Promise((resolve, reject) => {
+      const t = db.transaction('groups', 'readonly');
+      const r = t.objectStore('groups').getAll();
+      r.onsuccess = () => {
+        const list = r.result || [];
+        list.sort((a, b) => (a.order || 0) - (b.order || 0) || (a.createdAt || 0) - (b.createdAt || 0));
+        resolve(list);
+      };
+      r.onerror = () => reject(r.error);
+    });
+  },
+  putGroup(g) { return tx('groups', 'readwrite', (s) => s.put(g)); },
+  delGroup(id) { return tx('groups', 'readwrite', (s) => s.delete(id)); },
+
   async clearAll() {
     await tx('notes', 'readwrite', (s) => s.clear());
     await tx('pages', 'readwrite', (s) => s.clear());
+    await tx('groups', 'readwrite', (s) => s.clear());
   },
 };
 

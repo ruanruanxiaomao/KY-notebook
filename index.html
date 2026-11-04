@@ -23,6 +23,7 @@
     <button class="tab on" data-tab="ink">笔记本</button>
     <button class="tab" data-tab="shot">拍题</button>
     <button class="tab" data-tab="annot">图片 / PDF 批注</button>
+    <button class="tab" data-tab="map">思维导图</button>
   </nav>
   <div class="spacer"></div>
   <button class="btn ghost" id="btnPrompts" title="管理提示词">提示词</button>
@@ -36,6 +37,7 @@
       <div class="lib-head">
         <strong>我的笔记</strong>
         <div class="lib-actions">
+          <button class="btn mini" id="inkNewGroup" title="新建一个分组，把笔记归类">＋ 分组</button>
           <button class="btn mini" id="inkImportJson" title="从导出的 JSON 文件新建一本笔记">导入 JSON</button>
           <button class="btn mini" id="inkNew">＋ 新建</button>
         </div>
@@ -185,11 +187,67 @@
       <div class="pane-head">
         <strong>本页文字</strong>
         <span class="hint" id="annotTextCount"></span>
+        <button class="btn mini" id="annotToMap" title="把本页文字带到「思维导图」当素材">→ 导图</button>
       </div>
       <div class="ann-text" id="annotText"><div class="ph">导入 PDF 后，这里会显示本页文字。</div></div>
     </div>
   </section>
+
+  <!-- ============ 思维导图 ============ -->
+  <section class="view" id="view-map" hidden>
+    <div class="pane left map-left">
+      <div class="pane-head">
+        <strong>生成思维导图</strong>
+        <span class="hint">AI 只出结构，画图在本地</span>
+      </div>
+      <label class="field">中心主题
+        <input id="mapTopic" placeholder="例如：考研数学三 / 第五章 特征值">
+      </label>
+      <label class="field">素材（可选：粘一段文字，AI 从里面提炼）
+        <textarea class="custom" id="mapMaterial" rows="6"
+          placeholder="不填就让 AI 按主题自己展开；也可以从「PDF 批注」把本页文字带过来"></textarea>
+      </label>
+      <label class="field">展开层级
+        <select id="mapDepth">
+          <option value="2">2 层（大方向）</option>
+          <option value="3" selected>3 层（常用）</option>
+          <option value="4">4 层（细一点）</option>
+        </select>
+      </label>
+      <div class="row">
+        <button class="btn primary" id="mapGen">AI 生成</button>
+        <button class="btn ghost" id="mapDemo" title="不用接口，直接看一张示例">示例</button>
+        <button class="btn ghost" id="mapFit" title="回到居中 100%">居中</button>
+      </div>
+      <div class="status" id="mapStatus"></div>
+      <div class="row tight wrap">
+        <button class="btn mini" id="mapExportPng">导出 PNG</button>
+        <button class="btn mini" id="mapExportSvg">导出 SVG</button>
+        <button class="btn mini" id="mapCopy">复制大纲</button>
+        <button class="btn mini" id="mapToNote" title="存成笔记本里的一页图片，可继续手写">存为笔记</button>
+      </div>
+    </div>
+
+    <div class="pane right map-stage">
+      <div class="map-wrap">
+        <div class="map-canvas" id="mapCanvas"></div>
+        <div class="map-empty" id="mapEmpty">写个主题，点「AI 生成」；或点「示例」先看效果。</div>
+      </div>
+    </div>
+  </section>
 </main>
+
+<!-- ============ 移动到分组 ============ -->
+<dialog id="dlgMove" class="dlg">
+  <form method="dialog" class="dlg-body">
+    <h3>移动到分组</h3>
+    <p class="hint" id="moveWho"></p>
+    <div class="group-pick" id="moveList"></div>
+    <div class="row end">
+      <button class="btn ghost" value="cancel">取消</button>
+    </div>
+  </form>
+</dialog>
 
 <!-- ============ 导出 JSON ============ -->
 <dialog id="dlgExportJson" class="dlg">
@@ -201,6 +259,20 @@
     <div class="row end">
       <button class="btn ghost" value="cancel">取消</button>
       <button class="btn primary" id="expGo" value="go">导出</button>
+    </div>
+  </form>
+</dialog>
+
+<!-- ============ 起名 / 改名 ============ -->
+<dialog id="dlgName" class="dlg">
+  <form method="dialog" class="dlg-body">
+    <h3 id="nameTitle">新建分组</h3>
+    <label class="field">名称
+      <input id="nameInput" placeholder="例如：考研数学 / 错题本 / 英语" autocomplete="off">
+    </label>
+    <div class="row end">
+      <button class="btn ghost" value="cancel">取消</button>
+      <button class="btn primary" value="ok">确定</button>
     </div>
   </form>
 </dialog>
