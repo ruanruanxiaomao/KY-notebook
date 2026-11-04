@@ -134,7 +134,111 @@ class LocalServer {
       writeText(out, 200, "");
       return;
     }
+    if (path.equals("/sysfonts")) { serveSysFonts(out); return; }
+    if (path.equals("/sysfont")) { serveSysFont(out, query); return; }
     serveStatic(out, path);
+  }
+
+  /* ---------- 系统字体 ----------
+     用户在外面换了「字体样式」之后，WebView 里用 font-family 名字是拿不到那个字体的，
+     所以这里把手机里实际装着的字体文件列出来、按需求原样吐给网页，由网页用 FontFace 装进去。 */
+
+  private static String jesc(String s) {
+    StringBuilder b = new StringBuilder();
+    for (int i = 0; i < s.length(); i++) {
+      char c = s.charAt(i);
+      if (c == '"' || c == '\\') b.append('\\').append(c);
+      else if (c < 0x20) b.append(' ');
+      else b.append(c);
+    }
+    return b.toString();
+  }
+
+  private void serveSysFonts(OutputStream out) throws IOException {
+    StringBuilder sb = new StringBuilder("[");
+    boolean first = true;
+    try {
+      if (android.os.Build.VERSION.SDK_INT >= 29) {
+        java.util.TreeMap<String, java.io.File> map = new java.util.TreeMap<String, java.io.File>();
+        for (android.graphics.fonts.Font f : android.graphics.fonts.SystemFonts.getAvailableFonts()) {
+          java.io.File file = f.getFile();
+          if (file == null) continue;
+          String n = file.getName();
+          String ln = n.toLowerCase(Locale.ROOT);
+          if (!ln.endsWith(".ttf") && !ln.endsWith(".otf")) continue;
+          if (!file.canRead()) continue;
+          map.put(n, file);
+        }
+        for (Map.Entry<String, java.io.File> e : map.entrySet()) {
+          String n = e.getKey();
+          String label = n.replaceAll("(?i)\\.(ttf|otf)$", "");
+          if (!first) sb.append(',');
+          first = false;
+          sb.append("{\"name\":\"").append(jesc(n))
+            .append("\",\"label\":\"").append(jesc(label))
+            .append("\",\"path\":\"").append(jesc(e.getValue().getAbsolutePath()))
+            .append("\",\"size\":").append(e.getValue().length())
+            .append(",\"theme\":").append(e.getValue().getAbsolutePath().startsWith("/data/skin/fonts/") ? "true" : "false")
+            .append("}");
+        }
+      }
+    } catch (Throwable t) {
+      Log.w(TAG, "list fonts: " + t);
+    }
+    sb.append(']');
+    byte[] b = sb.toString().getBytes(StandardCharsets.UTF_8);
+    byte[] head = ("HTTP/1.1 200 X\r\n"
+        + "Content-Type: application/json; charset=utf-8\r\n"
+        + "Content-Length: " + b.length + "\r\n"
+        + "Access-Control-Allow-Origin: *\r\n"
+        + "Connection: close\r\n\r\n").getBytes(StandardCharsets.UTF_8);
+    out.write(head);
+    out.write(b);
+    out.flush();
+  }
+
+  private void serveSysFont(OutputStream out, String query) throws IOException {
+    String raw = "";
+    for (String kv : query.split("&")) {
+      int i = kv.indexOf('=');
+      if (i <= 0) continue;
+      if (kv.substring(0, i).equals("path")) {
+        try { raw = URLDecoder.decode(kv.substring(i + 1), "UTF-8"); }
+        catch (Throwable t) { raw = kv.substring(i + 1); }
+      }
+    }
+    /* 只允许读系统字体目录里的文件，别变成任意文件读取 */
+    String ok[] = { "/system/", "/product/", "/vendor/", "/cust/", "/data/fonts/", "/data/themes/", "/data/skin/fonts/" };
+    boolean allowed = false;
+    for (String pre : ok) if (raw.startsWith(pre)) { allowed = true; break; }
+    if (!allowed || raw.contains("..")) { writeText(out, 403, "forbidden"); return; }
+    java.io.File f = new java.io.File(raw);
+    if (!f.isFile()) { writeText(out, 404, "no such font"); return; }
+    long size = f.length();
+    if (size > 48L * 1024 * 1024) { writeText(out, 413, "font too big"); return; }
+    byte[] data = new byte[(int) size];
+    java.io.FileInputStream in = null;
+    try {
+      in = new java.io.FileInputStream(f);
+      int off = 0;
+      while (off < data.length) {
+        int n = in.read(data, off, data.length - off);
+        if (n < 0) break;
+        off += n;
+      }
+    } finally {
+      try { if (in != null) in.close(); } catch (Throwable ignored) {}
+    }
+    byte[] head = ("HTTP/1.1 200 X\r\n"
+        + "Content-Type: font/ttf\r\n"
+        + "Content-Length: " + data.length + "\r\n"
+        + "Cache-Control: max-age=86400\r\n"
+        + "Access-Control-Allow-Origin: *\r\n"
+        + "Connection: close\r\n\r\n").getBytes(StandardCharsets.UTF_8);
+    out.write(head);
+    out.write(data);
+    out.flush();
+    Log.i(TAG, "served font " + raw + " (" + data.length + " B)");
   }
 
   private static void cors(OutputStream out) throws IOException {

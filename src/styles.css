@@ -5,6 +5,9 @@
   /* 笔记里「识别出来的文字」用的字体：默认跟着系统的界面字体走，设置里可以换 */
   --text-font: system-ui, -apple-system, "HarmonyOS Sans SC", "HarmonyOS Sans", "MiSans",
     "PingFang SC", "Noto Sans CJK SC", "Source Han Sans SC", "Microsoft YaHei", sans-serif;
+  /* 界面字体：默认同系统；如果用户在外面的「字体样式」换过字体，main.js 会把那个字体塞到最前面 */
+  --ui-font: system-ui, -apple-system, "HarmonyOS Sans SC", "HarmonyOS Sans", "MiSans",
+    "PingFang SC", "Noto Sans CJK SC", "Source Han Sans SC", "Microsoft YaHei", sans-serif;
 }
 *{box-sizing:border-box}
 /* hidden 必须真的隐藏：块级元素自己写了 display:grid/flex，会盖掉 UA 的 [hidden]{display:none} */
@@ -12,7 +15,7 @@
 html,body{height:100%}
 body{
   margin:0;background:var(--bg);color:var(--ink);
-  font:15px/1.6 -apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+  font:15px/1.6 var(--ui-font);
   overflow:hidden;
 }
 h3{margin:0 0 6px}
@@ -358,6 +361,8 @@ main{height:calc(100% - 54px)}
 .ink-items .it-rs{display:none;position:absolute;right:-6px;bottom:-6px;width:14px;height:14px;
   border-radius:3px;background:#fff;border:1.5px solid var(--accent);cursor:nwse-resize;z-index:2}
 .ink-items .it.on .it-rs{display:block}
+/* 多选时只在操作条上批量操作，单块的 ✕ / 手柄收起来 */
+.ink-items.multi .it.on .it-del,.ink-items.multi .it.on .it-rs{display:none}
 
 /* ---------- 手写转文字面板 ---------- */
 .hwr-bar{display:flex;flex-direction:column;gap:6px;padding:8px 10px 10px;

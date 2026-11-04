@@ -455,6 +455,17 @@
       </label>
     </div>
     <div class="font-prev" id="fontPrev">中英混排 Handwriting 123 · 系统字体预览</div>
+    <label class="field">手机里的字体（主题换的字体也在这里）
+      <select id="cfgSysFont">
+        <option value="">不用（就用上面的默认字体）</option>
+      </select>
+    </label>
+    <div class="row" style="align-items:center;gap:8px">
+      <button class="btn ghost mini" type="button" id="cfgSysFontReload">重新读取手机字体</button>
+      <button class="btn ghost mini" type="button" id="cfgSysFontFile">从文件选…</button>
+      <span class="status" id="cfgSysFontStatus"></span>
+    </div>
+    <input type="file" id="cfgSysFontInput" accept=".ttf,.otf,font/ttf,font/otf" hidden>
     <div class="row" style="align-items:center;gap:10px">
       <label class="field" style="flex:1">手写识别停笔多久开始（毫秒）
         <input id="cfgIdle" type="number" min="200" max="2000" step="50" value="600">

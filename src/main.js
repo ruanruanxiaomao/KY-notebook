@@ -32,18 +32,134 @@ const annot = initAnnot();
 const map = initMap();
 window.__kynb = { notebook, shot, annot, map };   /* 调试 / 冒烟测试用 */
 
-/* ---------- 笔记文字字体（默认 = 系统界面字体） ---------- */
-const FONT_KEY = 'kynb_font';
-let fontSaved = '';
-try { fontSaved = localStorage.getItem(FONT_KEY) || ''; } catch (e) { fontSaved = ''; }
+/* ---------- 笔记文字字体 ---------- */
+const FONT_KEY = 'kynb_font';              /* 文字块字体（黑体/宋体/楷体…，'' = 默认） */
+const SYSFONT_KEY = 'kynb_sysfont';        /* 'auto' | 'none' | 字体文件路径 */
+const DEFAULT_TEXT = (getComputedStyle(document.documentElement).getPropertyValue('--text-font').trim())
+  || 'system-ui, sans-serif';
+const DEFAULT_UI = (getComputedStyle(document.documentElement).getPropertyValue('--ui-font').trim())
+  || DEFAULT_TEXT;
 
-function applyFont(v) {
+let fontSaved = '';
+let sysChoice = 'auto';        /* auto=跟随手机主题字体 */
+let sysFontPath = '';          /* 当前真正在用的字体文件 */
+let themeFont = '';            /* 检测到的「主题字体」文件（/data/skin/fonts/ 下那个） */
+let fontList = null;
+try {
+  fontSaved = localStorage.getItem(FONT_KEY) || '';
+  sysChoice = localStorage.getItem(SYSFONT_KEY) || 'auto';
+} catch (e) { /* 无痕模式 */ }
+
+let sysFace = null;
+
+/** 把字体栈拼出来：装上了手机字体就排在第一位，后面的照旧兜底 */
+function applyFont() {
   const root = document.documentElement;
-  if (v) root.style.setProperty('--text-font', v);
-  else root.style.removeProperty('--text-font');     /* 空 = 回到 styles.css 里的系统字体栈 */
+  const textBase = fontSaved || DEFAULT_TEXT;
+  const textStack = sysFace ? `"KYPhoneFont", ${textBase}` : (fontSaved || '');
+  if (textStack) root.style.setProperty('--text-font', textStack);
+  else root.style.removeProperty('--text-font');
+  /* 界面文字也跟着手机字体走（用户既然在主题里换过字体，整个 App 都该长一样） */
+  root.style.setProperty('--ui-font', sysFace ? `"KYPhoneFont", ${DEFAULT_UI}` : DEFAULT_UI);
   try { if (notebook && notebook.refreshFont) notebook.refreshFont(); } catch (e) { /* 早期调用 */ }
+  const prev = document.getElementById('fontPrev');
+  if (prev) {
+    prev.textContent = '中英混排 Handwriting 123 · ' + (sysFace ? '手机字体' : (fontSaved ? '自定义字体' : '系统字体'));
+  }
 }
-applyFont(fontSaved);
+
+/**
+ * 把字体文件装进页面。
+ * 手机上「设置→字体样式」换的字体，WebView 里用 font-family 名字是拿不到的，
+ * 所以走壳层的 /sysfont 把字体文件本身取回来，用 FontFace 装上。
+ */
+async function useSysFont(pathOrUrl) {
+  try {
+    const url = /^(blob:|data:)/.test(pathOrUrl)
+      ? pathOrUrl
+      : '/sysfont?path=' + encodeURIComponent(pathOrUrl);
+    const face = new FontFace('KYPhoneFont', `url("${url}")`);
+    await face.load();
+    if (sysFace) { try { document.fonts.delete(sysFace); } catch (e) { /* 忽略 */ } }
+    document.fonts.add(face);
+    sysFace = face;
+    sysFontPath = pathOrUrl;
+    applyFont();
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+function dropSysFont() {
+  if (sysFace) { try { document.fonts.delete(sysFace); } catch (e) { /* 忽略 */ } }
+  sysFace = null;
+  sysFontPath = '';
+  applyFont();
+}
+
+applyFont();
+
+async function getFontList() {
+  if (fontList) return fontList;
+  const r = await fetch('/sysfonts', { cache: 'no-store' });
+  if (!r.ok) throw new Error('HTTP ' + r.status);
+  fontList = await r.json();
+  return fontList;
+}
+
+/** 主题字体 = /data/skin/fonts/ 下体积最大的那个（主题换的字体就放这儿） */
+function pickThemeFont(list) {
+  const ts = list.filter((f) => f.theme);
+  if (!ts.length) return '';
+  ts.sort((a, b) => (b.size || 0) - (a.size || 0));
+  return ts[0].path;
+}
+
+/** 启动时按保存的选择把字体装上 */
+(async function bootFont() {
+  try {
+    const list = await getFontList();
+    themeFont = pickThemeFont(list);
+  } catch (e) { /* 网页版没有这个接口 */ }
+  let want = '';
+  if (sysChoice === 'auto') want = themeFont;
+  else if (sysChoice !== 'none') want = sysChoice;
+  if (want) await useSysFont(want);
+})();
+
+let sysFontsLoaded = false;
+async function fillSysFonts(force) {
+  const sel = $('cfgSysFont');
+  const st = $('cfgSysFontStatus');
+  if (!sel) return;
+  if (sysFontsLoaded && !force) { sel.value = sysChoice; return; }
+  st.className = 'status';
+  st.textContent = '读取中…';
+  try {
+    if (force) fontList = null;
+    const list = await getFontList();
+    themeFont = pickThemeFont(list);
+    sel.innerHTML = '<option value="auto">跟随手机主题字体（默认）</option>'
+      + '<option value="none">不用，使用 App 默认字体</option>';
+    for (const f of list) {
+      const o = document.createElement('option');
+      o.value = f.path;
+      o.textContent = f.label + (f.theme ? '（主题字体）' : '');
+      sel.appendChild(o);
+    }
+    sysFontsLoaded = true;
+    sel.value = sysChoice;
+    st.textContent = themeFont
+      ? '当前主题字体：' + themeFont.replace('/data/skin/fonts/', '')
+      : `读到 ${list.length} 个字体文件，没找到主题字体`;
+  } catch (e) {
+    sel.innerHTML = '<option value="auto">跟随手机主题字体</option>'
+      + '<option value="none">不用，使用 App 默认字体</option>';
+    sel.value = sysChoice;
+    st.textContent = '这个版本读不到手机字体（网页版没有这个接口，装成 App 才有）';
+  }
+}
 
 /* 点对话框外面的暗色区域也能关掉：手机上比找按钮顺手（返回键也可以） */
 document.querySelectorAll('dialog').forEach((d) => {
@@ -60,7 +176,8 @@ $('btnSettings').onclick = () => {
   $('cfgVision').checked = !!c.vision;
   $('cfgIdle').value = String(getHwrCfg().idle);
   $('cfgFont').value = fontSaved;
-  $('fontPrev').textContent = '中英混排 Handwriting 123 · ' + (fontSaved ? '自定义字体' : '系统字体');
+  applyFont();
+  fillSysFonts(false);
   try { $('cfgHud').checked = localStorage.getItem('kynb_hud') === '1'; } catch (e) { $('cfgHud').checked = false; }
   $('cfgModelList').innerHTML = '';
   $('cfgFetchStatus').textContent = '';
@@ -84,45 +201,49 @@ $('cfgSave').onclick = () => {
   /* 字体：选中项即保存（''=系统默认） */
   fontSaved = $('cfgFont').value || '';
   try { localStorage.setItem(FONT_KEY, fontSaved); } catch (e) { /* 忽略 */ }
-  applyFont(fontSaved);
+  applyFont();
 };
 
 /* 设置里换字体立刻能看见效果；点「取消」则回到已保存的那个 */
-$('cfgFont').onchange = () => {
-  applyFont($('cfgFont').value);
-  $('fontPrev').textContent = '中英混排 Handwriting 123 · '
-    + ($('cfgFont').value ? '自定义字体' : '系统字体');
-};
-dlgSettings.addEventListener('close', () => { applyFont(fontSaved); });
+$('cfgFont').onchange = () => { applyFont(); };
+dlgSettings.addEventListener('close', () => { applyFont(); });
 
-/* 从接口拉模型列表：填进 datalist，输入框可直接下拉选 */
-async function fetchModels(auto) {
-  const st = $('cfgFetchStatus');
-  const dl = $('cfgModelList');
-  const base = $('cfgBase').value.trim();
-  const key = $('cfgKey').value.trim();
-  if (!base) { st.className = 'status bad'; st.textContent = '先填 Base URL'; return; }
+/* ---------- 手机里的字体（含主题换的字体） ---------- */
+$('cfgSysFontReload').onclick = () => fillSysFonts(true);
+$('cfgSysFont').onchange = async () => {
+  const v = $('cfgSysFont').value;
+  const st = $('cfgSysFontStatus');
   st.className = 'status';
-  st.textContent = '正在拉取模型列表…';
-  try {
-    const ids = await listModels(base, key);
-    dl.innerHTML = '';
-    ids.forEach((id) => {
-      const o = document.createElement('option');
-      o.value = id;
-      dl.appendChild(o);
-    });
-    st.className = 'status ok';
-    st.textContent = `拿到 ${ids.length} 个模型，点「模型」输入框可下拉选`;
-    if (ids.length === 1 && !$('cfgModel').value.trim()) $('cfgModel').value = ids[0];
-  } catch (e) {
-    st.className = 'status bad';
-    st.textContent = e && e.message ? e.message : String(e);
+  sysChoice = v || 'auto';
+  try { localStorage.setItem(SYSFONT_KEY, sysChoice); } catch (e) { /* 忽略 */ }
+  if (sysChoice === 'none') {
+    dropSysFont();
+    st.textContent = '已回到 App 默认字体';
+    return;
   }
-}
-
-$('cfgFetch').onclick = () => fetchModels(false);
-$('cfgOpenPad').onclick = () => { dlgSettings.close(); notebook.openHandPad(true); };
+  const want = sysChoice === 'auto' ? themeFont : sysChoice;
+  if (!want) { dropSysFont(); st.textContent = '没找到主题字体，已用默认字体'; return; }
+  st.textContent = '正在加载字体文件…';
+  const ok = await useSysFont(want);
+  st.textContent = ok ? '已换成手机里的这个字体（整个 App 都生效）' : '这个字体文件加载失败';
+  if (!ok) st.className = 'status bad';
+};
+$('cfgSysFontFile').onclick = () => { $('cfgSysFontInput').value = ''; $('cfgSysFontInput').click(); };
+$('cfgSysFontInput').onchange = async () => {
+  const f = $('cfgSysFontInput').files && $('cfgSysFontInput').files[0];
+  if (!f) return;
+  const st = $('cfgSysFontStatus');
+  st.className = 'status';
+  st.textContent = '正在加载 ' + f.name + ' …';
+  const ok = await useSysFont(URL.createObjectURL(f));
+  if (ok) {
+    st.textContent = `已用「${f.name}」渲染（只在这次打开有效，重开 App 要再选）`;
+    $('cfgSysFont').value = '';
+  } else {
+    st.className = 'status bad';
+    st.textContent = '这个文件不是字体（要 .ttf / .otf）';
+  }
+};
 
 /* ---------- 提示词 ---------- */
 const dlgPrompts = $('dlgPrompts');
