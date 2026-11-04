@@ -206,6 +206,15 @@ export function initNotebook() {
   function refreshFont() {
     _fontStack = '';
     board.textFont = textFont();
+    /* 换了字体（比如手机主题字体加载完），字宽会变；只把不够宽的那些撑开，不动用户手动调过的 */
+    const p = pageNow();
+    if (p && Array.isArray(p.items)) {
+      for (const it of p.items) {
+        if (it.type !== 'text') continue;
+        const need = Math.ceil(measureW(it.text, it.size || 32)) + Math.ceil((it.size || 32) * 0.35);
+        if (need > (it.w || 0)) fitItemWidth(it);
+      }
+    }
     renderItems();
     refreshBar();
   }
