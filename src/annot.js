@@ -324,7 +324,9 @@ function fontHeight(it, tr) {
   return guess > 0.5 ? guess : 10;
 }
 
-/** items: page.getTextContent().items；vp0: page.getViewport({scale:1}) */
+/** items: page.getTextContent().items；vp0: page.getViewport({scale:1})
+    排版感知：XY-cut —— 每次只切最宽的一条缝（先竖切分栏，切不动再横切分带），
+    递归到切不动为止，再在每块内聚行、聚段。单栏页面结果与旧版一致；双栏 / 三栏正文不再串行。 */
 export function itemsToParas(items, vp0) {
   const W = vp0.width || 1;
   const H = vp0.height || 1;
@@ -341,10 +343,103 @@ export function itemsToParas(items, vp0) {
   });
   if (!raw.length) return { paras: [], chars: 0 };
 
-  /* 1) 按 y 聚行 */
-  raw.sort((a, b) => a.y - b.y || a.x - b.x);
+  const forceOneLine = looksLikeToc(raw);
+  const paras = [];
+  const blocks = forceOneLine ? [raw] : walk(raw, 0);
+  blocks.forEach((block) => {
+    collectColumn(block, forceOneLine).forEach((p) => paras.push(p));
+  });
+  const chars = paras.reduce((n, p) => n + p.text.length, 0);
+  return { paras, chars };
+}
+
+/* 目录 / 索引页：行内「条目 ⇢ 页码」那种大空档，一行一段才合理 */
+function looksLikeToc(raw) {
+  const rows = buildRows(raw);
+  if (rows.length < 5) return false;
+  let leader = 0;
+  rows.forEach((r) => {
+    if (r.gap < 0.06) return;
+    const tail = r.tail || '';
+    const digits = (tail.match(/\d/g) || []).length;
+    if (tail.length <= 6 && digits >= Math.max(1, Math.floor(tail.length / 2))) leader += 1;
+  });
+  return leader / rows.length >= 0.4;
+}
+
+/* 递归 XY-cut：竖切优先（分栏），切不动再横切（页眉 / 标题 / 正文分开） */
+function walk(items, depth) {
+  if (depth > 5 || items.length < 4) return [items];
+  const cols = splitOnce(items, 'x', 0.018, { tol: 0.03, spanRatio: 0.45, minCount: 3 });
+  if (cols) return walk(cols[0], depth + 1).concat(walk(cols[1], depth + 1));
+  const bands = splitOnce(items, 'y', 0.02, { tol: 0, spanRatio: 0, minCount: 2 });
+  if (bands) return walk(bands[0], depth + 1).concat(walk(bands[1], depth + 1));
+  return [items];
+}
+
+/* 在某一轴上找最宽的一条「几乎没人覆盖」的缝，切一刀；两侧不够实就返回 null（宁可不切） */
+function splitOnce(items, axis, minGap, opt) {
+  const isX = axis === 'x';
+  const lo = (i) => (isX ? i.x : i.y);
+  const hi = (i) => (isX ? i.x + i.w : i.y + i.h);
+  const start = Math.min(...items.map(lo));
+  const end = Math.max(...items.map(hi));
+  if (end - start <= minGap * 1.2) return null;
+
+  const BIN = 0.003;
+  const n = Math.max(2, Math.ceil((end - start) / BIN) + 1);
+  const cov = new Uint16Array(n);
+  items.forEach((it) => {
+    const a2 = Math.max(0, Math.floor((lo(it) - start) / BIN));
+    const b2 = Math.min(n - 1, Math.floor((hi(it) - start) / BIN));
+    for (let k = a2; k <= b2; k++) cov[k] += 1;
+  });
+
+  /* tol：容许多少条跨栏元素压在缝上（通栏标题、页脚），按条数百分比算 */
+  const tol = Math.max(1, Math.round(items.length * (opt.tol || 0)));
+  let best = null;
+  let run = -1;
+  for (let k = 0; k <= n; k++) {
+    const free = k < n && cov[k] <= tol;
+    if (free) { if (run < 0) run = k; continue; }
+    if (run >= 0) {
+      const w0 = start + run * BIN;
+      const w1 = start + k * BIN;
+      const width = w1 - w0;
+      /* 贴边的空档不算缝（那是右侧参差 / 上下留白） */
+      const inner = w0 > start + 0.02 && w1 < end - 0.02;
+      if (inner && width >= minGap && (!best || width > best.w)) best = { w: width, at: (w0 + w1) / 2 };
+      run = -1;
+    }
+  }
+  if (!best) return null;
+
+  const left = [];
+  const right = [];
+  items.forEach((it) => {
+    const c = (lo(it) + hi(it)) / 2;
+    (c <= best.at ? left : right).push(it);
+  });
+  if (!left.length || !right.length) return null;
+
+  const total = items.length;
+  /* 竖向跨度永远按 y 量：横切时它就是切的轴，竖切时用来判断「这一栏有没有贯穿整块」
+     （居中标题切出来的两边又窄又矮，靠这个挡掉） */
+  const ySpan = (g) => Math.max(...g.map((i) => i.y + i.h)) - Math.min(...g.map((i) => i.y));
+  const spanAll = ySpan(items);
+  const ok = [left, right].every((g) => {
+    if (g.length < Math.max(opt.minCount, total * 0.04)) return false;
+    if (!opt.spanRatio) return true;
+    return ySpan(g) >= spanAll * opt.spanRatio;
+  });
+  return ok ? [left, right] : null;
+}
+
+/* 聚行：同一高度、字高相近的 item 归一行；返回行数组 */
+function buildRows(items) {
+  const sorted = items.slice().sort((a, b) => a.y - b.y || a.x - b.x);
   const lines = [];
-  raw.forEach((it) => {
+  sorted.forEach((it) => {
     const last = lines[lines.length - 1];
     if (last && Math.abs(it.y - last.y) <= Math.max(last.h, it.h) * 0.6) {
       last.items.push(it);
@@ -355,36 +450,68 @@ export function itemsToParas(items, vp0) {
     }
   });
 
-  /* 2) 行内按 x 拼字；行距超过 1.9 倍行高就换段 */
-  const paras = [];
-  let cur = null;
-  let prevTop = 0;
-  let prevH = 0;
+  const rows = [];
   lines.forEach((ln) => {
     ln.items.sort((a, b) => a.x - b.x);
     let text = '';
     let prevEnd = null;
+    let maxGap = 0;
+    let tail = '';
     ln.items.forEach((it) => {
-      if (prevEnd !== null && it.x - prevEnd > Math.max(0.008, it.h * 0.3)) text += ' ';
+      if (prevEnd !== null) {
+        const gap = it.x - prevEnd;
+        if (gap > maxGap) { maxGap = gap; tail = it.s.trim(); }
+        if (gap > Math.max(0.008, it.h * 0.3)) text += ' ';
+      }
       text += it.s;
       prevEnd = it.x + it.w;
     });
     text = text.replace(/\s+/g, ' ').trim();
     if (!text) return;
-    const x0 = Math.min(...ln.items.map((i) => i.x));
-    const x1 = Math.max(...ln.items.map((i) => i.x + i.w));
-    const row = { text, x0, x1, top: ln.y, bottom: ln.y + ln.h, h: ln.h };
-    if (cur && (row.top - prevTop) <= Math.max(row.h, prevH) * 1.9) {
-      cur.lines.push(row);
-    } else {
-      cur = { lines: [row] };
-      paras.push(cur);
+    rows.push({
+      text, gap: maxGap, tail,
+      x0: Math.min(...ln.items.map((i) => i.x)),
+      x1: Math.max(...ln.items.map((i) => i.x + i.w)),
+      top: ln.y, bottom: ln.y + ln.h, h: ln.h,
+    });
+  });
+  return rows;
+}
+
+/* 一整块（单栏）内：聚行 → 聚段 */
+function collectColumn(items, forceOneLine) {
+  const rows = buildRows(items);
+  if (!rows.length) return [];
+
+  const leaderRows = rows.filter((r) => r.gap >= 0.06).length;
+  const oneLineEach = forceOneLine || (rows.length >= 4 && leaderRows / rows.length >= 0.5);
+
+  const steps = rows.slice(1).map((r, i) => r.top - rows[i].top).filter((v) => v > 0);
+  const lead = steps.length ? steps.slice().sort((a, b) => a - b)[Math.floor(steps.length / 2)] : 0;
+  const left = Math.min(...rows.map((r) => r.x0));
+  const rights = rows.map((r) => r.x1).sort((a, b) => a - b);
+  const rightEdge = rights[Math.floor(rights.length * 0.75)];   /* 本栏常见的右边线 */
+  const colW = Math.max(0.05, rightEdge - left);
+
+  const groups = [];
+  let cur = null;
+  rows.forEach((r, i) => {
+    const prev = rows[i - 1];
+    let brk = !cur || oneLineEach;
+    if (cur && !oneLineEach) {
+      const vGap = r.top - prev.top;
+      const bigGap = vGap > Math.max(r.h, prev.h) * 1.45 && (!lead || vGap > lead * 1.5);
+      const sizeJump = Math.abs(r.h - prev.h) > Math.max(r.h, prev.h) * 0.18;
+      /* 上一行明显比本栏常见右边界短 + 这一行从块左起：段落末行的典型特征 → 换段
+         （参差排版的行尾只短几个字，不会被误判） */
+      const shortEnd = prev.x1 < rightEdge - Math.max(0.02, colW * 0.25)
+        && (r.x0 - left) < Math.max(0.01, colW * 0.06);
+      brk = bigGap || sizeJump || shortEnd;
     }
-    prevTop = row.top;
-    prevH = row.h;
+    if (brk) { cur = { lines: [r] }; groups.push(cur); } else { cur.lines.push(r); }
   });
 
-  const out = paras.map((p) => {
+  return groups.map((p) => {
     const y0 = Math.min(...p.lines.map((l) => l.top));
     const y1 = Math.max(...p.lines.map((l) => l.bottom));
     const x0 = Math.min(...p.lines.map((l) => l.x0));
@@ -394,9 +521,6 @@ export function itemsToParas(items, vp0) {
       box: { x: x0, y: y0, w: Math.max(0.002, x1 - x0), h: Math.max(0.004, y1 - y0) },
     };
   }).filter((p) => p.text);
-
-  const chars = out.reduce((n, p) => n + p.text.length, 0);
-  return { paras: out, chars };
 }
 
 function escapeHtml(s) {
