@@ -32,6 +32,24 @@ const annot = initAnnot();
 const map = initMap();
 window.__kynb = { notebook, shot, annot, map };   /* 调试 / 冒烟测试用 */
 
+/* ---------- 笔记文字字体（默认 = 系统界面字体） ---------- */
+const FONT_KEY = 'kynb_font';
+let fontSaved = '';
+try { fontSaved = localStorage.getItem(FONT_KEY) || ''; } catch (e) { fontSaved = ''; }
+
+function applyFont(v) {
+  const root = document.documentElement;
+  if (v) root.style.setProperty('--text-font', v);
+  else root.style.removeProperty('--text-font');     /* 空 = 回到 styles.css 里的系统字体栈 */
+  try { if (notebook && notebook.refreshFont) notebook.refreshFont(); } catch (e) { /* 早期调用 */ }
+}
+applyFont(fontSaved);
+
+/* 点对话框外面的暗色区域也能关掉：手机上比找按钮顺手（返回键也可以） */
+document.querySelectorAll('dialog').forEach((d) => {
+  d.addEventListener('click', (e) => { if (e.target === d) d.close('cancel'); });
+});
+
 /* ---------- 设置 ---------- */
 const dlgSettings = $('dlgSettings');
 $('btnSettings').onclick = () => {
@@ -41,6 +59,8 @@ $('btnSettings').onclick = () => {
   $('cfgModel').value = c.model || '';
   $('cfgVision').checked = !!c.vision;
   $('cfgIdle').value = String(getHwrCfg().idle);
+  $('cfgFont').value = fontSaved;
+  $('fontPrev').textContent = '中英混排 Handwriting 123 · ' + (fontSaved ? '自定义字体' : '系统字体');
   try { $('cfgHud').checked = localStorage.getItem('kynb_hud') === '1'; } catch (e) { $('cfgHud').checked = false; }
   $('cfgModelList').innerHTML = '';
   $('cfgFetchStatus').textContent = '';
@@ -61,7 +81,19 @@ $('cfgSave').onclick = () => {
   const hud = !!$('cfgHud').checked;
   try { localStorage.setItem('kynb_hud', hud ? '1' : '0'); } catch (e) { /* 忽略 */ }
   notebook.setHud(hud);
+  /* 字体：选中项即保存（''=系统默认） */
+  fontSaved = $('cfgFont').value || '';
+  try { localStorage.setItem(FONT_KEY, fontSaved); } catch (e) { /* 忽略 */ }
+  applyFont(fontSaved);
 };
+
+/* 设置里换字体立刻能看见效果；点「取消」则回到已保存的那个 */
+$('cfgFont').onchange = () => {
+  applyFont($('cfgFont').value);
+  $('fontPrev').textContent = '中英混排 Handwriting 123 · '
+    + ($('cfgFont').value ? '自定义字体' : '系统字体');
+};
+dlgSettings.addEventListener('close', () => { applyFont(fontSaved); });
 
 /* 从接口拉模型列表：填进 datalist，输入框可直接下拉选 */
 async function fetchModels(auto) {

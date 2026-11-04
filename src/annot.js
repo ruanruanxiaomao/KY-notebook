@@ -469,6 +469,7 @@ export function initAnnot() {
 
   $('annotTocOpen').onclick = () => { renderToc(); $('dlgToc').showModal(); };
   $('tocClose').onclick = () => $('dlgToc').close();
+  $('tocX').onclick = () => $('dlgToc').close();       /* 右上角的 ✕：手机上底部按钮可能被挤出屏幕 */
 
   /* ---------- 本页文字 ---------- */
   function renderText() {

@@ -149,6 +149,104 @@ export function groupLines(strokes) {
   }));
 }
 
+/* ---------------- 字块切分 / 长行分块 ----------------
+   PP-OCR 的 rec 模型是按 [3,48,320] 训的（官方 tricks：宽高比 > 10 的样本训练时直接丢弃），
+   所以一行写太长、宽高比超过 6~7 之后就开始「后半截掉字」。
+   解决：先按字块切出每个字，再按宽度攒成若干段，一段一段认（每段都保持窄长比），
+   段的间隙大就补一个空格。这也顺带让「字号」有了可靠的估计（字块高度）。 */
+
+/** 把笔画按「横向重叠 / 贴得很近」并成字块（一个字的几笔归一块），按 x 排好 */
+export function charClusters(strokes) {
+  const items = strokes.map((s) => ({ s, b: bboxOf([s]) })).filter((x) => x.b);
+  if (!items.length) return [];
+  const hs = items.map((x) => x.b.h).sort((a, b) => a - b);
+  const ref = Math.max(8, hs[Math.floor((hs.length - 1) * 0.75)] || 20);
+  const tol = ref * 0.22;
+  items.sort((a, b) => a.b.x - b.b.x);
+  const groups = [];
+  for (const it of items) {
+    let hit = null;
+    for (let i = groups.length - 1; i >= 0; i--) {
+      const g = groups[i];
+      if (it.b.x > g.x1 + tol) break;              /* 已经隔太远（x 升序） */
+      if (g.x0 > it.b.x + it.b.w + tol) continue;  /* 这个组在右边，往左看 */
+      const ov = Math.min(g.y1, it.b.y + it.b.h) - Math.max(g.y0, it.b.y);
+      if (ov < -ref * 0.5) continue;               /* 竖着不搭边：不是同一个字 */
+      hit = g; break;
+    }
+    if (hit) {
+      hit.items.push(it);
+      hit.x0 = Math.min(hit.x0, it.b.x);
+      hit.x1 = Math.max(hit.x1, it.b.x + it.b.w);
+      hit.y0 = Math.min(hit.y0, it.b.y);
+      hit.y1 = Math.max(hit.y1, it.b.y + it.b.h);
+    } else {
+      groups.push({ x0: it.b.x, x1: it.b.x + it.b.w, y0: it.b.y, y1: it.b.y + it.b.h, items: [it] });
+    }
+  }
+  groups.sort((a, b) => a.x0 - b.x0);
+  return groups.map((g) => ({ x0: g.x0, x1: g.x1, y0: g.y0, y1: g.y1, strokes: g.items.map((x) => x.s) }));
+}
+
+/**
+ * 一行太长就按字块切成若干段，每段宽高比不超过 maxRatio。
+ * 阈值定在 12 是实测出来的：12 字以内整行直认识别率并不差（PP-OCR 单图推理会按比例放宽宽度），
+ * 切得太碎反而因为「连接处切到笔画」掉字；超过 12 才切，且只切在字块缝上。
+ */
+export function splitLongLine(strokes, maxRatio) {
+  const mr = Number(maxRatio) || 12;
+  const all = bboxOf(strokes);
+  if (!all) return [];
+  const H = Math.max(8, all.h);
+  const whole = [{ strokes, x0: all.x, x1: all.x + all.w }];
+  if (all.w / H <= mr) return whole;
+  const cs = charClusters(strokes);
+  if (cs.length <= 1) return whole;
+  const out = [];
+  let cur = null;
+  for (const c of cs) {
+    const nx1 = cur ? Math.max(cur.x1, c.x1) : c.x1;
+    if (cur && (nx1 - cur.x0) / H > mr) { out.push(cur); cur = null; }
+    if (!cur) cur = { strokes: [], x0: c.x0, x1: c.x1 };
+    for (const s of c.strokes) cur.strokes.push(s);
+    cur.x1 = Math.max(cur.x1, c.x1);
+  }
+  if (cur && cur.strokes.length) out.push(cur);
+  return out.length ? out : whole;
+}
+
+/** 估字号：取字块高度的 80 分位（避开「一」「丶」这种扁/小的笔画），汉字字面高约占字号 0.88 */
+export function estimateSize(strokes) {
+  const hs = charClusters(strokes).map((c) => c.y1 - c.y0).filter((h) => h > 1).sort((a, b) => a - b);
+  if (!hs.length) return 0;
+  const h = hs[Math.min(hs.length - 1, Math.floor(hs.length * 0.8))];
+  return Math.max(12, Math.min(200, Math.round(h / 0.88)));
+}
+
+/**
+ * 一整行（或一整段）笔迹 → 文字：自动切段、逐段识别、按间隙补空格。
+ * score 取各段最小值（最不确定的那段说话），调用方据此决定要不要动墨迹。
+ */
+export async function recognizeStrokes(strokes) {
+  const parts = splitLongLine(strokes);
+  const all = bboxOf(strokes) || { h: 24 };
+  const H = Math.max(8, all.h);
+  let text = '', score = 1, ms = 0, prevX1 = null;
+  for (const p of parts) {
+    const ink = inkToCanvas(p.strokes);
+    if (!ink) continue;
+    let r;
+    try { r = await recognizeLocal(ink); } catch (e) { continue; }
+    ms += r.ms;
+    if (!r.text) continue;
+    if (text && prevX1 != null && p.x0 - prevX1 > H * 0.9) text += ' ';
+    text += r.text;
+    score = Math.min(score, r.score);
+    prevX1 = p.x1;
+  }
+  return { text: text.trim(), score, ms, parts: parts.length };
+}
+
 /**
  * 像不像公式：有「一条又长又平的横线，且它上下都有别的笔画」——
  * 分数线 / 分式 / 根号横线都能命中；普通横线文字里不会有这么多上下结构。

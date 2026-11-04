@@ -585,7 +585,7 @@ export class InkBoard {
     const lh = size * 1.55;
     const maxW = Math.max(10, it.w * k);
     ctx.save();
-    ctx.font = `${size}px -apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",system-ui,sans-serif`;
+    ctx.font = `${size}px ${this.textFont || 'system-ui, sans-serif'}`;
     ctx.fillStyle = it.color || '#1f1c18';
     ctx.textBaseline = 'top';
     const lines = [];

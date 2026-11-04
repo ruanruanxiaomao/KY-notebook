@@ -125,6 +125,15 @@
         <button class="btn mini ghost" id="selCancel">取消</button>
       </div>
 
+      <!-- 点中文字/图片后浮出来的操作条：改字号、改字、删除 -->
+      <div class="itbar" id="itBar" hidden>
+        <button data-act="minus" title="字号小一点">A−</button>
+        <button data-act="plus" title="字号大一点">A+</button>
+        <button data-act="edit" title="改文字内容">改字</button>
+        <button data-act="del" class="danger" title="删掉这块内容">删除</button>
+        <span class="itbar-info"></span>
+      </div>
+
       <!-- 手写转文字：像输入法一样写在板子里，认出字直接写进本页文本框 -->
       <div class="hwr-bar" id="hwrBar" hidden>
         <div class="hwr-head">
@@ -361,7 +370,10 @@
 
 <dialog id="dlgToc" class="dlg wide">
   <div class="dlg-body">
-    <h3>目录 / 页面</h3>
+    <div class="dlg-head">
+      <h3>目录 / 页面</h3>
+      <button class="dlg-x" id="tocX" title="关闭（也可以按返回键）">✕</button>
+    </div>
     <div class="toc-wrap">
       <div class="toc-outline" id="tocOutline"></div>
       <div class="toc-thumbs" id="tocThumbs"></div>
@@ -431,6 +443,18 @@
       <span class="status" id="cfgFetchStatus"></span>
     </div>
     <label class="check"><input type="checkbox" id="cfgVision"> 这个模型支持看图（拍题 / 图片解析 / 手写 AI 识别需要）</label>
+    <div class="row" style="align-items:center;gap:10px">
+      <label class="field" style="flex:1">笔记里的文字字体
+        <select id="cfgFont">
+          <option value="">系统默认（和手机界面一致）</option>
+          <option value='"HarmonyOS Sans SC","HarmonyOS Sans","Noto Sans CJK SC","Source Han Sans SC",system-ui,sans-serif'>黑体（思源 / HarmonyOS Sans）</option>
+          <option value='"Noto Serif CJK SC","Source Han Serif SC","Songti SC","SimSun",serif'>宋体</option>
+          <option value='"Kaiti SC","STKaiti","KaiTi","楷体",serif'>楷体</option>
+          <option value='"JetBrains Mono","Cascadia Mono",Consolas,monospace'>等宽</option>
+        </select>
+      </label>
+    </div>
+    <div class="font-prev" id="fontPrev">中英混排 Handwriting 123 · 系统字体预览</div>
     <div class="row" style="align-items:center;gap:10px">
       <label class="field" style="flex:1">手写识别停笔多久开始（毫秒）
         <input id="cfgIdle" type="number" min="200" max="2000" step="50" value="600">
