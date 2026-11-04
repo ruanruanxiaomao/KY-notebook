@@ -118,19 +118,85 @@ export function initAnnot() {
     }
   }
 
-  /* 把本页文字送进「思维导图」当素材（跨页签，走 window 上的钩子，不互相 import） */
-  $('annotToMap').onclick = () => {
-    const p = st.pages[st.idx];
-    const text = p && p.paras && p.paras.length
-      ? p.paras.map((x) => x.text).join('\n\n')
-      : '';
-    if (!text.trim()) {
-      $('annotStatus').textContent = '这一页没有文字层，导图没素材可用；可以手动写主题让 AI 展开。';
-      window.__kynbMapFeed && window.__kynbMapFeed('', '');
+  /* ---------- 文字层 → 笔记 / 导图 ---------- */
+  /* scope: 'page' 只取当前页；'all' 取整本（最多 30 页、约 2.4 万字） */
+  function gatherText(scope) {
+    if (!st.pages.length) return { text: '', pages: 0 };
+    const take = (p) => (p && p.paras ? p.paras.map((x) => x.text).join('\n\n') : '');
+    if (scope !== 'all') return { text: take(st.pages[st.idx]), pages: 1 };
+    const parts = [];
+    let used = 0;
+    for (let i = 0; i < st.pages.length && i < 30; i++) {
+      const t = take(st.pages[i]).trim();
+      if (!t) continue;
+      parts.push(`【第 ${i + 1} 页】\n${t}`);
+      used += 1;
+      if (parts.join('\n').length > 20000) break;
+    }
+    return { text: parts.join('\n\n').slice(0, 24000), pages: used };
+  }
+
+  const baseName = () => String(st.name || '批注').replace(/\.pdf$/i, '');
+
+  /* 别的模块（笔记的「→ 导图」）按来源文件名 + 页码来要文字，拿不到就返回空 */
+  window.__kynbPageText = (name, page) => {
+    if (!st.pages.length) return '';
+    if (name && st.name && name !== st.name) return '';
+    const i = Math.max(0, (Number(page) || 1) - 1);
+    const p = st.pages[i];
+    return p && p.paras ? p.paras.map((x) => x.text).join('\n\n') : '';
+  };
+
+  $('annotMakeNote').onclick = async () => {
+    const scope = $('annotScope').value;
+    const { text, pages } = gatherText(scope);
+    if (text.trim().length < 50) {
+      $('annotStatus').textContent = '这一' + (scope === 'all' ? '本' : '页') +
+        '没有可用的文字层（扫描件或图片），生成笔记需要文字；可以改用笔迹批注。';
       return;
     }
-    const title = String(st.name || '').replace(/\.pdf$/i, '');
-    if (window.__kynbMapFeed) window.__kynbMapFeed(text, title);
+    if (!cfgOk()) { $('annotStatus').textContent = '还没配置 AI 接口（右上角「设置」）'; return; }
+    const btn = $('annotMakeNote');
+    btn.disabled = true;
+    $('annotStatus').textContent = `正在生成笔记…（${pages} 页 / ${text.length} 字，可能要十几秒）`;
+    try {
+      const req = $('annotNoteReq').value.trim();
+      const sys = '你是笔记整理助手。只输出 Markdown 正文：不要解释、不要寒暄、不要用代码块包住整篇。';
+      const prompt = [
+        `素材：${baseName()}${scope === 'all' ? '（节选）' : ` 第 ${st.idx + 1} 页`}`,
+        req ? `要求：${req}` : '要求：整理成一篇可复习的笔记，用小标题分节，关键概念加粗，公式用 $…$。',
+        '',
+        '原文：',
+        text,
+      ].join('\n');
+      const raw = await chat({ system: sys, prompt, temperature: 0.3, maxTokens: 2600 });
+      const md = tidyAI(raw);
+      if (!md.trim()) throw new Error('模型返回了空内容');
+      const sink = noteSink();
+      if (!sink || !sink.addMdNote) throw new Error('笔记模块还没就绪');
+      const title = baseName() + (scope === 'all' ? ' · 笔记' : ` p${st.idx + 1} · 笔记`);
+      await sink.addMdNote(title, md, {
+        kind: st.kind === 'pdf' ? 'pdf' : 'img', name: st.name || '', page: st.idx + 1,
+      });
+      $('annotStatus').textContent = `已生成文字笔记「${title}」`;
+      const tab = document.querySelector('.tab[data-tab="ink"]');
+      if (tab) tab.click();
+    } catch (e) {
+      $('annotStatus').textContent = '生成失败：' + (e && e.message ? e.message : e);
+    } finally {
+      btn.disabled = false;
+    }
+  };
+
+  $('annotMakeMap').onclick = () => {
+    const { text, pages } = gatherText($('annotScope').value);
+    if (!text.trim()) {
+      $('annotStatus').textContent = '没有文字层，导图没有素材可用；可以手写主题让 AI 自己展开。';
+      if (window.__kynbMapFeed) window.__kynbMapFeed('', baseName());
+      return;
+    }
+    $('annotStatus').textContent = `已把 ${pages} 页文字送到导图页`;
+    if (window.__kynbMapFeed) window.__kynbMapFeed(text, baseName());
   };
 
   $('annotPickImg').onclick = () => { $('annotFileImg').value = ''; $('annotFileImg').click(); };

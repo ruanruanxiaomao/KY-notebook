@@ -170,6 +170,7 @@ export class InkBoard {
     const down = (e) => {
       if (e.button !== undefined && e.button !== 0 && e.pointerType === 'mouse') return;
       e.preventDefault();
+      if (this.tool === 'pan') return;     /* 抓手：不在画布上落笔，交给外层做平移 */
       try { cv.setPointerCapture(e.pointerId); } catch (err) { /* 合成事件会抛，忽略 */ }
       const t = this.tool;
       const st = { t, c: this.color, w: this.size, pts: [] };

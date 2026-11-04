@@ -54,16 +54,18 @@
         <button class="btn mini" id="inkStar" title="收藏">☆</button>
         <button class="btn mini" id="inkExportPng" title="导出 PNG（当前页）">PNG</button>
         <button class="btn mini" id="inkExportJson" title="导出 JSON（整本）">JSON</button>
+        <button class="btn mini" id="inkToMap" title="用这本笔记的文字生成思维导图" hidden>→ 导图</button>
         <button class="btn mini danger" id="inkDel" title="删除这本笔记">🗑</button>
       </div>
 
       <div class="srcbar" id="inkSrcBar" hidden></div>
 
-      <div class="tools">
+      <div class="tools" id="inkTools">
         <div class="group">
           <button class="tool on" data-tool="pen" title="笔">✏️</button>
           <button class="tool" data-tool="hl" title="荧光笔">🖍</button>
           <button class="tool" data-tool="er" title="橡皮">🧽</button>
+          <button class="tool" data-tool="pan" title="抓手：拖动平移画布">✋</button>
         </div>
         <div class="group" id="inkColors"></div>
         <div class="group" id="inkSizes"></div>
@@ -83,6 +85,12 @@
           </label>
         </div>
         <div class="group pager">
+          <button class="tool" id="inkZoomOut" title="缩小">−</button>
+          <span id="inkZoomInfo" title="滚轮缩放 / 双指捏合">100%</span>
+          <button class="tool" id="inkZoomIn" title="放大">＋</button>
+          <button class="tool" id="inkZoomFit" title="回到适应窗口">⤢</button>
+        </div>
+        <div class="group pager">
           <button class="tool" id="inkPrev" title="上一页">‹</button>
           <span id="inkPageInfo">第 1 页</span>
           <button class="tool" id="inkNext" title="下一页">›</button>
@@ -94,6 +102,19 @@
         <div class="paper" id="inkPaper">
           <canvas id="inkCv"></canvas>
         </div>
+      </div>
+
+      <!-- 文字笔记（AI 生成 / 手改的 markdown） -->
+      <div class="md-wrap" id="inkMd" hidden>
+        <div class="md-bar">
+          <button class="btn mini" id="inkMdEdit">编辑</button>
+          <span class="hint" id="inkMdInfo"></span>
+          <span class="spacer"></span>
+          <button class="btn mini" id="inkMdSave" hidden>保存</button>
+          <button class="btn mini danger" id="inkMdCancel" hidden>取消</button>
+        </div>
+        <div class="out md-view" id="inkMdView"></div>
+        <textarea class="md-src" id="inkMdSrc" hidden spellcheck="false"></textarea>
       </div>
     </section>
   </section>
@@ -165,6 +186,18 @@
         <button class="btn primary" id="annotAsk">让 AI 解析本页</button>
         <span class="status" id="annotStatus"></span>
       </div>
+      <label class="field">AI 生成笔记的要求（可选）
+        <textarea class="custom" id="annotNoteReq" rows="2"
+          placeholder="例如：按考点整理成复习提纲，公式用 $…$，每节给出易错点"></textarea>
+      </label>
+      <div class="row">
+        <select id="annotScope" title="AI 读多少内容">
+          <option value="page">只读本页</option>
+          <option value="all">读整本（最多 30 页）</option>
+        </select>
+        <button class="btn primary" id="annotMakeNote" title="把文字层交给 AI，生成一篇文字笔记">AI 生成笔记</button>
+        <button class="btn ghost" id="annotMakeMap" title="把文字层交给导图页当素材">→ 导图</button>
+      </div>
       <div class="row tight wrap">
         <button class="btn mini" id="annotExportPng">导出本页 PNG</button>
         <button class="btn mini" id="annotExportJson">导出批注 JSON</button>
@@ -187,7 +220,6 @@
       <div class="pane-head">
         <strong>本页文字</strong>
         <span class="hint" id="annotTextCount"></span>
-        <button class="btn mini" id="annotToMap" title="把本页文字带到「思维导图」当素材">→ 导图</button>
       </div>
       <div class="ann-text" id="annotText"><div class="ph">导入 PDF 后，这里会显示本页文字。</div></div>
     </div>

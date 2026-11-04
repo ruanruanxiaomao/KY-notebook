@@ -51,7 +51,7 @@ export function initMap() {
     const sys = '你是一位把知识整理成树状结构的助手。你只输出层级大纲，绝不解释、不寒暄。';
     const p = [
       `中心主题：${topic}`,
-      material.trim() ? `素材：\n${material.trim().slice(0, 6000)}` : '',
+      material.trim() ? `素材：\n${material.trim().slice(0, 12000)}` : '',
       '要求：',
       `1. 用「- 」开头表示节点，缩进两个空格表示下一层；`,
       `2. 最多 ${depth} 层（中心主题算第 1 层），同一层 3~6 个节点；`,

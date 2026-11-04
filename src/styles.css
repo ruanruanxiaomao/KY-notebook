@@ -264,3 +264,20 @@ main{height:calc(100% - 54px)}
   #view-map{grid-template-columns:1fr}
   .map-wrap{min-height:52vh}
 }
+
+/* 文字笔记（markdown） */
+.md-wrap{flex:1;min-height:0;display:flex;flex-direction:column;overflow:hidden}
+.md-wrap[hidden]{display:none}
+.md-bar{display:flex;align-items:center;gap:8px;padding:6px 10px;border-bottom:1px solid var(--line);
+  background:#fffdf8}
+.md-view{flex:1;min-height:0;border:0;border-radius:0;padding:20px 26px;max-width:860px;width:100%;
+  margin:0 auto;font-size:14.5px}
+.md-src{flex:1;margin:10px;border:1px solid var(--line);border-radius:10px;padding:12px 14px;
+  font:13.5px/1.7 ui-monospace,Menlo,Consolas,monospace;resize:none;background:#fffdf8;min-height:0}
+.card .thumb.doc{display:flex;align-items:center;justify-content:center;font-size:24px;background:#fffaf0}
+
+/* 画布拖拽 / 缩放 */
+.stage.grab{cursor:grab}
+.stage.panning{cursor:grabbing;user-select:none}
+#inkZoomInfo{min-width:46px;text-align:center;font-size:12.5px;color:var(--sub);
+  font-variant-numeric:tabular-nums}

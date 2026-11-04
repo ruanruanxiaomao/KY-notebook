@@ -2,6 +2,7 @@
 import { store, uid, fmtTime } from './store.js';
 import { InkBoard, COLORS, SIZES } from './inkboard.js';
 import { buildNoteJson, parseNoteJson } from './notejson.js';
+import { mdInto } from './md.js';
 
 const LS_LAST = 'kynb_last_note';
 const LS_LAST_AT = 'kynb_last_note_at';   /* 最后落盘时间：用来判断「刚写过」要不要自动回到那本 */
@@ -22,7 +23,7 @@ export function initNotebook() {
   const srcBar = $('inkSrcBar');
 
   const board = new InkBoard($('inkCv'), $('inkPaper'), $('inkStage'));
-  const st = { note: null, pages: [], idx: 0, tool: 'pen', color: COLORS[0], size: SIZES[1], saveT: 0 };
+  const st = { note: null, mode: 'ink', md: '', mdEditing: false, pages: [], idx: 0, tool: 'pen', color: COLORS[0], size: SIZES[1], saveT: 0 };
 
   /* ---------- 工具栏 ---------- */
   const colorBox = $('inkColors');
@@ -59,6 +60,8 @@ export function initNotebook() {
     b.onclick = () => {
       st.tool = b.dataset.tool;
       board.tool = st.tool;
+      const stage0 = $('inkStage');
+      if (stage0) stage0.classList.toggle('grab', st.tool === 'pan');
       document.querySelectorAll('.tool[data-tool]').forEach((x) => x.classList.remove('on'));
       b.classList.add('on');
     };
@@ -78,6 +81,92 @@ export function initNotebook() {
 
   board.onChange = () => saveSoon(false);
 
+  /* ---------- 画布缩放 / 拖拽平移 ---------- */
+  const stageEl = $('inkStage');
+  const zoomInfo = $('inkZoomInfo');
+  const ZOOM_KEY = 'kynb_zoom';
+
+  function paintZoom() {
+    zoomInfo.textContent = Math.round((board.zoom || 1) * 100) + '%';
+    try { localStorage.setItem(ZOOM_KEY, String(board.zoom || 1)); } catch (e) { /* 无痕模式忽略 */ }
+  }
+
+  /* 以 (cx, cy) 为锚点缩放：缩放前后让这个点在屏幕上不动 */
+  function setZoom(z, cx, cy) {
+    const r = stageEl.getBoundingClientRect();
+    const px = cx == null ? r.width / 2 : cx - r.left;
+    const py = cy == null ? r.height / 2 : cy - r.top;
+    const before = board.paper.clientWidth || 1;
+    board.setZoom(z);
+    const after = board.paper.clientWidth || 1;
+    const k = after / before;
+    stageEl.scrollLeft = (stageEl.scrollLeft + px) * k - px;
+    stageEl.scrollTop = (stageEl.scrollTop + py) * k - py;
+    paintZoom();
+  }
+
+  $('inkZoomIn').onclick = () => setZoom((board.zoom || 1) + 0.15);
+  $('inkZoomOut').onclick = () => setZoom((board.zoom || 1) - 0.15);
+  $('inkZoomFit').onclick = () => {
+    board.setZoom(1);
+    stageEl.scrollTo({ left: 0, top: 0 });
+    paintZoom();
+  };
+
+  stageEl.addEventListener('wheel', (e) => {
+    if (st.mode === 'md' || !st.note) return;
+    e.preventDefault();
+    setZoom((board.zoom || 1) * (e.deltaY < 0 ? 1.1 : 1 / 1.1), e.clientX, e.clientY);
+  }, { passive: false });
+
+  const ptrs = new Map();
+  let panState = null;
+  let pinchState = null;
+
+  stageEl.addEventListener('pointerdown', (e) => {
+    if (st.mode === 'md' || !st.note) return;
+    ptrs.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (ptrs.size === 2) {
+      const [a, b] = [...ptrs.values()];
+      pinchState = { d0: Math.hypot(a.x - b.x, a.y - b.y), z0: board.zoom || 1 };
+      panState = null;
+      stageEl.classList.remove('panning');
+      return;
+    }
+    if (st.tool === 'pan' && ptrs.size === 1) {
+      panState = { x: e.clientX, y: e.clientY, l: stageEl.scrollLeft, t: stageEl.scrollTop };
+      stageEl.classList.add('panning');
+      try { stageEl.setPointerCapture(e.pointerId); } catch (err) { /* 合成事件 */ }
+    }
+  });
+
+  stageEl.addEventListener('pointermove', (e) => {
+    if (ptrs.has(e.pointerId)) ptrs.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (panState) {
+      stageEl.scrollLeft = panState.l - (e.clientX - panState.x);
+      stageEl.scrollTop = panState.t - (e.clientY - panState.y);
+      return;
+    }
+    if (pinchState && ptrs.size === 2) {
+      const [a, b] = [...ptrs.values()];
+      const d = Math.hypot(a.x - b.x, a.y - b.y);
+      if (pinchState.d0 > 12) {
+        setZoom(pinchState.z0 * d / pinchState.d0, (a.x + b.x) / 2, (a.y + b.y) / 2);
+      }
+    }
+  });
+
+  const endPointer = (e) => {
+    ptrs.delete(e.pointerId);
+    if (ptrs.size < 2) pinchState = null;
+    if (ptrs.size === 0) {
+      panState = null;
+      stageEl.classList.remove('panning');
+    }
+  };
+  stageEl.addEventListener('pointerup', endPointer);
+  stageEl.addEventListener('pointercancel', endPointer);
+
   /* ---------- 保存 ---------- */
   function saveSoon(force) {
     clearTimeout(st.saveT);
@@ -86,7 +175,19 @@ export function initNotebook() {
 
   /** quick=true：只写页面和元数据、跳过缩略图与重绘列表——切后台 / 转屏时用，越快落盘越好 */
   async function saveNow(quick) {
-    if (!st.note || !st.pages.length) return;
+    if (!st.note) return;
+    if (st.mode === 'md') {
+      st.note.title = titleEl.value.trim() || '未命名笔记';
+      st.note.md = st.md || '';
+      st.note.pageCount = 1;
+      st.note.updatedAt = Date.now();
+      await store.putNote({ ...st.note });
+      localStorage.setItem(LS_LAST, st.note.id);
+      localStorage.setItem(LS_LAST_AT, String(Date.now()));
+      if (!quick) renderLib();
+      return;
+    }
+    if (!st.pages.length) return;
     const page = st.pages[st.idx];
     page.strokes = board.getStrokes();
     page.template = board.template;
@@ -110,7 +211,9 @@ export function initNotebook() {
 
   /* 安卓壳：转屏 / 切后台 / 被系统回收都会重建 WebView，这里不等 700ms 防抖，直接落盘 */
   function flushSave() {
-    if (!st.note || !st.pages.length) return;
+    if (!st.note) return;
+    if (st.mode === 'md') { clearTimeout(st.saveT); saveNow(true); return; }
+    if (!st.pages.length) return;
     clearTimeout(st.saveT);
     saveNow(true);
   }
@@ -150,11 +253,70 @@ export function initNotebook() {
     };
   }
 
+  /* ---------- 文字笔记（markdown） ---------- */
+  function setMdEditing(on) {
+    st.mdEditing = !!on;
+    $('inkMdSrc').hidden = !on;
+    $('inkMdView').hidden = !!on;
+    $('inkMdEdit').hidden = !!on;
+    $('inkMdSave').hidden = !on;
+    $('inkMdCancel').hidden = !on;
+    $('inkMdInfo').hidden = !!on;
+    if (on) {
+      $('inkMdSrc').value = st.md;
+      $('inkMdSrc').focus();
+    }
+  }
+
+  async function openMdNote(n) {
+    st.mode = 'md';
+    st.md = n.md || '';
+    st.pages = [];
+    st.note = n;
+    titleEl.value = n.title || '未命名笔记';
+    starBtn.textContent = n.star ? '★' : '☆';
+    starBtn.style.color = n.star ? '#c9a227' : '';
+    edEl.hidden = false;
+    libEl.parentElement.style.display = 'none';
+    const view = libEl.closest('.view');
+    if (view) view.classList.add('editing');
+    $('inkTools').hidden = true;
+    $('inkStage').hidden = true;
+    $('inkMd').hidden = false;
+    $('inkToMap').hidden = false;
+    $('inkExportPng').hidden = true;
+    pageInfo.textContent = '文字笔记';
+    setMdEditing(false);
+    mdInto($('inkMdView'), st.md);
+    $('inkMdInfo').textContent = `${(st.md || '').length} 字`;
+    renderSrc(n.src || null);
+  }
+
+  $('inkMdEdit').onclick = () => setMdEditing(true);
+  $('inkMdCancel').onclick = () => setMdEditing(false);
+  $('inkMdSave').onclick = async () => {
+    st.md = $('inkMdSrc').value;
+    setMdEditing(false);
+    $('inkMdInfo').textContent = `${st.md.length} 字`;
+    await mdInto($('inkMdView'), st.md);
+    await saveNow();
+    renderLib();
+    toast('已保存');
+  };
+
   async function openNote(id) {
     const n = await store.getNote(id);
     if (!n) return;
+    if (n.kind === 'md') { await openMdNote(n); localStorage.setItem(LS_LAST, id); return; }
     const pages = await store.pagesOf(id);
     st.note = n;
+    st.mode = 'ink';
+    st.md = '';
+    $('inkTools').hidden = false;
+    $('inkStage').hidden = false;
+    $('inkMd').hidden = true;
+    $('inkExportPng').hidden = false;
+    $('inkToMap').hidden = !n.src;
     st.pages = pages.length ? pages.map((p) => ({
       no: p.no, template: p.template || 'blank', strokes: p.strokes || [], bg: p.bg || null,
     })) : [{ no: 0, template: 'blank', strokes: [], bg: null }];
@@ -171,6 +333,9 @@ export function initNotebook() {
     renderSrc(n.src || null);
     loadPage(0);
     requestAnimationFrame(() => board.layout());
+    const z = Number(localStorage.getItem(ZOOM_KEY) || 1);
+    if (z && z !== board.zoom) board.setZoom(z);
+    paintZoom();
     localStorage.setItem(LS_LAST, id);
   }
 
@@ -182,6 +347,12 @@ export function initNotebook() {
     if (st.note !== opened) return;
     st.note = null;
     st.pages = [];
+    st.mode = 'ink';
+    st.md = '';
+    $('inkMd').hidden = true;
+    $('inkTools').hidden = false;
+    $('inkStage').hidden = false;
+    $('inkToMap').hidden = true;
     edEl.hidden = true;
     renderSrc(null);
     libEl.parentElement.style.display = '';
@@ -224,6 +395,7 @@ export function initNotebook() {
   };
 
   $('inkExportPng').onclick = async () => {
+    if (st.mode === 'md') { toast('文字笔记没有画布，用「→ 导图」或导出 JSON 保存内容', true); return; }
     const url = await board.exportPng(2);
     const a = document.createElement('a');
     a.href = url;
@@ -248,7 +420,7 @@ export function initNotebook() {
     const note = await store.getNote(st.note.id);
     const pages = [];
     let bgN = 0;
-    for (const p of st.pages) {
+    for (const p of (st.mode === 'md' ? [] : st.pages)) {
       let bg = false;
       if (withBg && p.bg) { bg = await shrinkBgDataUrl(p.bg); bgN++; }
       pages.push({ no: p.no, template: p.template, bg, strokes: p.strokes });
@@ -282,6 +454,24 @@ export function initNotebook() {
 
     const id = uid('note');
     const fallback = f.name.replace(/\.json$/i, '').trim() || '导入的笔记';
+
+    if (r.kind === 'md') {
+      const doc = {
+        id, title: r.title || fallback, kind: 'md', md: r.md, star: r.star,
+        createdAt: r.createdAt, updatedAt: Date.now(), pageCount: 1, thumb: '',
+      };
+      if (r.src) doc.src = r.src;
+      try {
+        await store.putNote(doc);
+      } catch (e) {
+        toast('写入失败：' + (e.message || e), true);
+        return;
+      }
+      await renderLib();
+      toast(`已导入文字笔记「${doc.title}」`);
+      return;
+    }
+
     const note = {
       id, title: r.title || fallback, kind: 'ink', star: r.star,
       createdAt: r.createdAt, updatedAt: Date.now(), pageCount: r.pages.length, thumb: '',
@@ -380,11 +570,12 @@ export function initNotebook() {
     c.className = 'card';
     c.draggable = true;
     c.dataset.id = n.id;
+    const isDoc = n.kind === 'md';
     c.innerHTML = `
-        <div class="thumb" style="${n.thumb ? `background-image:url('${n.thumb}')` : ''}"></div>
+        <div class="thumb${isDoc ? ' doc' : ''}" style="${n.thumb ? `background-image:url('${n.thumb}')` : ''}">${isDoc ? '📝' : ''}</div>
         <div class="meta">
           <div class="name">${escapeHtml(n.title || '未命名笔记')}</div>
-          <div class="sub">${n.pageCount || 1} 页 · ${fmtTime(n.updatedAt)}</div>
+          <div class="sub">${isDoc ? '文字笔记' : (n.pageCount || 1) + ' 页'} · ${fmtTime(n.updatedAt)}</div>
         </div>
         ${n.src && n.src.kind ? `<div class="src" title="${escapeHtml(srcFull(n.src))}">${escapeHtml(srcBadge(n.src))}</div>` : ''}
         ${n.star ? '<div class="star">★</div>' : ''}
@@ -537,6 +728,32 @@ export function initNotebook() {
     return id;
   }
 
+  /* 新建一篇文字笔记（AI 生成的结果落到这里） */
+  async function addMdNote(title, md, src) {
+    const id = uid('note');
+    const note = {
+      id, title: title || 'AI 笔记', kind: 'md', md: String(md || ''), star: 0,
+      createdAt: Date.now(), updatedAt: Date.now(), pageCount: 1, thumb: '',
+    };
+    if (src) note.src = src;
+    await store.putNote(note);
+    await renderLib();
+    await openNote(id);
+    return id;
+  }
+
+  /* 用这本笔记的文字生成导图：文字笔记用正文，手写笔记用来源 PDF 的那一页文字 */
+  $('inkToMap').onclick = () => {
+    const title = (titleEl.value || '').trim() || '思维导图';
+    let text = '';
+    if (st.mode === 'md') {
+      text = st.md || '';
+    } else if (st.note && st.note.src && typeof window.__kynbPageText === 'function') {
+      text = window.__kynbPageText(st.note.src.name, st.note.src.page) || '';
+    }
+    if (window.__kynbMapFeed) window.__kynbMapFeed(text, title);
+  };
+
   /* 拍题 / 批注页「存为笔记」：把一张底图存成一页，并记下来源 */
   async function addBgPage(dataUrl, title, src, strokes) {
     const from = src || { kind: 'shot', name: title || '拍题', page: 1 };
@@ -561,7 +778,7 @@ export function initNotebook() {
     return id;
   }
 
-  const api = { renderLib, newNote, openNote, board, state: st, addBgPage, addBgNote, toast };
+  const api = { renderLib, newNote, openNote, board, state: st, addBgPage, addBgNote, addMdNote, toast };
   noteApi = api;
   return api;
 }

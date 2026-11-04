@@ -35,6 +35,8 @@ export function buildNoteJson(note, pages) {
     createdAt: note.createdAt || Date.now(),
     pageCount: pages.length,
   };
+  if (note.kind) meta.kind = note.kind;
+  if (typeof note.md === 'string') meta.md = note.md;   /* 文字笔记的正文 */
   const src = readSrc(note);
   if (src) meta.src = src;
   return {
@@ -63,11 +65,16 @@ export function parseNoteJson(text) {
   if (!Number.isInteger(v) || v < 1) return bad(`版本号不合法：${v}`);
   if (v > SCHEMA_V) return bad(`文件是 v=${v}，当前只认到 v=${SCHEMA_V}，请换新版本再导入`);
 
-  if (!Array.isArray(data.pages) || !data.pages.length) return bad('没有 pages（或 pages 是空的）');
+  const n = data.note && typeof data.note === 'object' && !Array.isArray(data.note) ? data.note : {};
+  const isMd = n.kind === 'md' && typeof n.md === 'string';
+  if (!isMd && (!Array.isArray(data.pages) || !data.pages.length)) {
+    return bad('没有 pages（或 pages 是空的）');
+  }
 
   const pages = [];
-  for (let i = 0; i < data.pages.length; i++) {
-    const pg = data.pages[i];
+  const pageList = isMd ? [] : data.pages;
+  for (let i = 0; i < pageList.length; i++) {
+    const pg = pageList[i];
     const at = `第 ${i + 1} 页`;
     if (!pg || typeof pg !== 'object' || Array.isArray(pg)) return bad(`${at}不是对象`);
     if (pg.strokes !== undefined && !Array.isArray(pg.strokes)) return bad(`${at}的 strokes 不是数组`);
@@ -97,8 +104,10 @@ export function parseNoteJson(text) {
     });
   }
 
-  const n = data.note && typeof data.note === 'object' && !Array.isArray(data.note) ? data.note : {};
   const title = typeof n.title === 'string' ? n.title.trim() : '';
   const createdAt = typeof n.createdAt === 'number' && isFinite(n.createdAt) ? n.createdAt : Date.now();
-  return { ok: true, title, star: n.star ? 1 : 0, createdAt, src: readSrc(n), pages };
+  return {
+    ok: true, kind: isMd ? 'md' : 'ink', md: isMd ? n.md : '',
+    title, star: n.star ? 1 : 0, createdAt, src: readSrc(n), pages,
+  };
 }
