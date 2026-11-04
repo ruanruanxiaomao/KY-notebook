@@ -65,7 +65,10 @@ export function initShot(notebook) {
   }
 
   $('shotPick').onclick = () => { fileInput.value = ''; fileInput.click(); };
-  fileInput.onchange = () => takeFile(fileInput.files && fileInput.files[0]);
+  fileInput.onchange = () => {
+    takeFile(fileInput.files && fileInput.files[0]);
+    fileInput.removeAttribute('capture');   /* 「相机」留下的 capture 不能影响下一次「选择图片」 */
+  };
   $('shotClear').onclick = clearImage;
 
   ['dragenter', 'dragover'].forEach((ev) => drop.addEventListener(ev, (e) => {
@@ -80,11 +83,21 @@ export function initShot(notebook) {
   drop.addEventListener('click', () => { if (!st.dataUrl) $('shotPick').click(); });
 
   /* ---------- 相机 ---------- */
+  /* 安卓壳：WebView 里没声明 CAMERA 权限，getUserMedia 一定被拒 —— 直接交给系统相机/相册入口 */
+  const isAndroidShell = () => !!(window.KYNative && window.KYNative.platform && window.KYNative.platform() === 'android');
+  const pickViaSystemCapture = () => {
+    fileInput.setAttribute('capture', 'environment');
+    fileInput.click();
+  };
+
   $('shotCam').onclick = async () => {
+    if (isAndroidShell()) {
+      pickViaSystemCapture();
+      status.textContent = '已打开系统相机 / 相册，拍完选这张图即可';
+      return;
+    }
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-      const f = fileInput;
-      f.setAttribute('capture', 'environment');
-      f.click();
+      pickViaSystemCapture();
       return;
     }
     try {
@@ -106,6 +119,11 @@ export function initShot(notebook) {
         stop();
       };
     } catch (e) {
+      if (isAndroidShell()) {
+        pickViaSystemCapture();
+        status.textContent = '调不到内置相机，已切到系统相机 / 相册';
+        return;
+      }
       status.textContent = '打不开相机：' + (e.message || e);
     }
   };

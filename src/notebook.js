@@ -4,6 +4,7 @@ import { InkBoard, COLORS, SIZES } from './inkboard.js';
 import { buildNoteJson, parseNoteJson } from './notejson.js';
 
 const LS_LAST = 'kynb_last_note';
+const LS_LAST_AT = 'kynb_last_note_at';   /* 最后落盘时间：用来判断「刚写过」要不要自动回到那本 */
 
 /* initNotebook() 之后把一份 API 挂在这里，annot.js 存笔记时用，不必再经 main.js 传一圈 */
 let noteApi = null;
@@ -83,7 +84,8 @@ export function initNotebook() {
     st.saveT = setTimeout(() => saveNow(), force ? 120 : 700);
   }
 
-  async function saveNow() {
+  /** quick=true：只写页面和元数据、跳过缩略图与重绘列表——切后台 / 转屏时用，越快落盘越好 */
+  async function saveNow(quick) {
     if (!st.note || !st.pages.length) return;
     const page = st.pages[st.idx];
     page.strokes = board.getStrokes();
@@ -99,10 +101,21 @@ export function initNotebook() {
     st.note.pageCount = st.pages.length;
     st.note.updatedAt = Date.now();
     st.note.title = titleEl.value.trim() || '未命名笔记';
-    st.note.thumb = await board.thumb(320);
+    if (!quick) st.note.thumb = await board.thumb(320);
     await store.putNote({ ...st.note });
-    renderLib();
+    localStorage.setItem(LS_LAST, st.note.id);
+    localStorage.setItem(LS_LAST_AT, String(Date.now()));
+    if (!quick) renderLib();
   }
+
+  /* 安卓壳：转屏 / 切后台 / 被系统回收都会重建 WebView，这里不等 700ms 防抖，直接落盘 */
+  function flushSave() {
+    if (!st.note || !st.pages.length) return;
+    clearTimeout(st.saveT);
+    saveNow(true);
+  }
+  document.addEventListener('visibilitychange', () => { if (document.hidden) flushSave(); });
+  window.addEventListener('pagehide', flushSave);
 
   /* ---------- 页面 ---------- */
   function loadPage(i) {
@@ -326,6 +339,28 @@ export function initNotebook() {
   }
 
   renderLib();
+
+  /* 刚写过（10 分钟内）就自动回到那本：安卓转屏会重建 WebView，靠这个保持连续 */
+  (function resumeLast() {
+    const id = localStorage.getItem(LS_LAST);
+    const at = Number(localStorage.getItem(LS_LAST_AT) || 0);
+    if (!id || !at || Date.now() - at > 10 * 60 * 1000) return;
+    store.getNote(id).then((n) => { if (n && !st.note) openNote(id); }).catch(() => {});
+  })();
+
+  /* 安卓返回键（原生会先问这里），一次退一层「看得见的」层：
+     弹窗 → 关弹窗；不在笔记本标签 → 切回笔记本；编辑器 → 笔记库；都没有则返回 false 交给系统退出 */
+  window.__kynbHandleBack = function handleBack() {
+    const dlg = Array.prototype.find.call(document.querySelectorAll('dialog'), (d) => d.open);
+    if (dlg) { dlg.close('cancel'); return true; }
+    const on = document.querySelector('.tab.on');
+    if (on && on.dataset.tab !== 'ink') {
+      const ink = document.querySelector('.tab[data-tab="ink"]');
+      if (ink) { ink.click(); return true; }
+    }
+    if (st.note) { closeNote(); return true; }
+    return false;
+  };
 
   /* 拍题 / 批注页「存为笔记」：把一张底图存成一页，并记下来源 */
   async function addBgPage(dataUrl, title, src, strokes) {

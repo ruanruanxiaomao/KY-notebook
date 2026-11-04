@@ -112,9 +112,16 @@ public class MainActivity extends Activity {
   }
 
   @Override public void onBackPressed() {
-    if (wv != null && wv.canGoBack()) { wv.goBack(); return; }
-    if (wv != null) wv.evaluateJavascript("window.dispatchEvent(new Event('kynb:android-back'))", null);
-    super.onBackPressed();
+    /* 先问网页「这个返回你要不要自己吃」：弹窗 / 编辑器 → 笔记库 / 非笔记本标签页。
+       网页返回 '1' 表示它处理了；否则才真正退出 App。 */
+    if (wv == null) { super.onBackPressed(); return; }
+    wv.evaluateJavascript("(window.__kynbHandleBack && window.__kynbHandleBack()) ? '1' : '0'",
+        new ValueCallback<String>() {
+          @Override public void onReceiveValue(String v) {
+            boolean handled = v != null && v.contains("1");
+            if (!handled) MainActivity.super.onBackPressed();
+          }
+        });
   }
 
   @Override protected void onDestroy() {

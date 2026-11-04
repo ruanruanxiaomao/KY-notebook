@@ -53,6 +53,11 @@ OUT_DIR = os.path.join(PROJECT, 'dist-android')
 SRC_JAVA = os.path.join(HERE, 'app', 'src')
 SHIM = os.path.join(HERE, 'app', 'assets', 'www', 'android-shim.js')
 
+# 应用图标：换基座 res/mipmap-*/ic_launcher.png 的像素（路径不变，arsc 不用动）
+ICON_DIR = os.path.join(HERE, 'app', 'res')
+ICON_MAP = [('mipmap-mdpi-v4', 48), ('mipmap-hdpi-v4', 72), ('mipmap-xhdpi-v4', 96),
+            ('mipmap-xxhdpi-v4', 144), ('mipmap-xxxhdpi-v4', 192)]
+
 # 网页要打进去的东西：index.html + src/*.js（demo 没有打包步骤，直接照搬）
 WEB_FILES = ['index.html']
 WEB_DIRS = ['src']
@@ -285,6 +290,16 @@ def main():
     arsc = patch_arsc_pkg(arsc)
 
     replace = {'classes.dex': dex, 'AndroidManifest.xml': axml, 'resources.arsc': arsc}
+    icons = 0
+    for d, px in ICON_MAP:
+        p = os.path.join(ICON_DIR, 'ic_launcher_%d.png' % px)
+        if os.path.exists(p):
+            replace['res/%s/ic_launcher.png' % d] = read(p)
+            icons += 1
+    if icons:
+        log('  图标: 替换 %d 档 ic_launcher.png' % icons)
+    else:
+        log('  图标: 没找到 android/app/res/ic_launcher_*.png，沿用基座图标')
     extras = {'assets/www/' + k: v for k, v in web.items()}
     unsigned = os.path.join(WORK, 'kynb-unsigned.apk')
     log('[4/5] 打包（%d 个 assets）' % len(extras))
