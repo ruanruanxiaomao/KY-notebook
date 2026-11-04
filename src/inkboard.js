@@ -15,7 +15,12 @@ export class InkBoard {
     this.cv = canvas;
     this.paper = paper;
     this.stage = stage;
-    this.ctx = canvas.getContext('2d');
+    /* desynchronized：Chromium 上允许跳过一部分合成同步，实测能压低笔迹延迟 */
+    this.ctx = canvas.getContext('2d', { desynchronized: true });
+    /* 离屏画布只放「已完成的笔画」：抬笔时把这一笔盖上去，之后每帧只 drawImage 一次，
+       不再每来一个采样点就把全部笔画重画一遍（笔画一多就是这里卡的） */
+    this._off = document.createElement('canvas');
+    this._offCtx = this._off.getContext('2d');
     this.zoom = opts.zoom || 1;
     /* 页面坐标系：默认 1414x1000；批注页按 PDF / 图片的版式比例改成竖版，笔迹才不会挤在中间一条 */
     this.pageW = opts.pageW || PAGE_W;
@@ -32,6 +37,10 @@ export class InkBoard {
        屏幕上是 DOM（可拖可删），导出 PNG / 缩略图时由下面的 _paintItems 画进来 */
     this.items = [];
     this._st = null;
+    this._rect = null;   // 一次手势只读一次 getBoundingClientRect
+    this._pred = null;   // 浏览器预测的后续点（只画、不写进数据）
+    this._raf = 0;
+    this._rawAt = 0;     // 最近一次 pointerrawupdate 的时间戳，用来避免和 pointermove 重复
     this._k = 1;      // 页面坐标 → 设备像素
     this._s = 1;      // 页面坐标 → CSS 像素
     this.onChange = null;
@@ -71,6 +80,9 @@ export class InkBoard {
     this.cv.style.height = cssH + 'px';
     this.cv.width = bw;
     this.cv.height = bh;
+    this._off.width = bw;
+    this._off.height = bh;
+    this._rect = null;
     /* 页面坐标 → 设备像素用真实 backing 尺寸算（避免 round 累积误差） */
     this._k = bw / this.pageW;
     this._s = this._k / dpr;
@@ -163,20 +175,78 @@ export class InkBoard {
     ctx.restore();
   }
 
+  /** 全量重建：所有笔画先画进离屏，再合成一次 */
   redraw() {
+    const W = this.cv.width;
+    const H = this.cv.height;
+    const octx = this._offCtx;
+    octx.setTransform(1, 0, 0, 1, 0, 0);
+    octx.clearRect(0, 0, W, H);
+    octx.setTransform(this._k, 0, 0, this._k, 0, 0);
+    const save = this.ctx;
+    this.ctx = octx;
+    for (const st of this.strokes) this._paintStroke(st);
+    this.ctx = save;
+    this.drawLive();
+  }
+
+  /** 每帧只做一次：离屏 + 正在写的这一笔（+ 预测点） */
+  drawLive() {
     const ctx = this.ctx;
-    const W = this.cv.width, H = this.cv.height;
+    const W = this.cv.width;
+    const H = this.cv.height;
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, W, H);
+    ctx.drawImage(this._off, 0, 0);
+    const st = this._st;
+    if (!st) return;
     ctx.setTransform(this._k, 0, 0, this._k, 0, 0);
-    for (const st of this.strokes) this._paintStroke(st);
+    this._paintStroke(st);
+    this._paintPredicted(ctx, st);
+  }
+
+  /** 笔尾的预测段：只为「看起来跟手」，不进 strokes 数据，下一帧自然被真实点覆盖 */
+  _paintPredicted(ctx, st) {
+    const pred = this._pred;
+    if (!pred || !pred.length) return;
+    const n = st.pts.length;
+    if (n < 3) return;
+    ctx.save();
+    ctx.globalAlpha = st.t === 'hl' ? 0.3 : 1;
+    ctx.strokeStyle = st.c;
+    ctx.lineWidth = (st.w || 4) * (st.t === 'hl' ? 3 : 1);
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    ctx.beginPath();
+    ctx.moveTo(st.pts[n - 3], st.pts[n - 2]);
+    for (const q of pred) ctx.lineTo(q[0], q[1]);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  _scheduleDraw() {
+    if (this._raf) return;
+    this._raf = requestAnimationFrame(() => {
+      this._raf = 0;
+      this.drawLive();
+    });
+  }
+
+  /** 抬笔：把这一笔画进离屏（O(1)，不重画其它笔画） */
+  _commit(st) {
+    const octx = this._offCtx;
+    octx.setTransform(this._k, 0, 0, this._k, 0, 0);
+    const save = this.ctx;
+    this.ctx = octx;
+    this._paintStroke(st);
+    this.ctx = save;
   }
 
   /* ---------- 输入 ---------- */
   _pt(e) {
-    const r = this.cv.getBoundingClientRect();
-    /* 用「实际显示宽度 / 页面宽度」换算，而不是缓存下来的 _s：窗口缩放、CSS 变换、dpr 变化时
-       缓存的 _s 会和真实显示尺寸脱节，笔迹就会跟不上鼠标（抖动/画歪） */
+    /* 每帧每个采样点都调 getBoundingClientRect 会强制同步布局，是卡顿的主因之一；
+       一笔只读一次（落笔时刷新），layout() 里会清空缓存 */
+    const r = this._rect || (this._rect = this.cv.getBoundingClientRect());
     const s = (r.width / this.pageW) || this._s;
     const x = (e.clientX - r.left) / s;
     const y = (e.clientY - r.top) / s;
@@ -186,6 +256,7 @@ export class InkBoard {
 
   _bind() {
     const cv = this.cv;
+
     const down = (e) => {
       if (e.button !== undefined && e.button !== 0 && e.pointerType === 'mouse') return;
       e.preventDefault();
@@ -194,53 +265,106 @@ export class InkBoard {
       if (this.tool === 'del') {           /* 整笔删除：点一下删掉命中的那一笔 */
         this._delOn = true;
         this._delPushed = false;
+        this._rect = cv.getBoundingClientRect();
         this.eraseAt(e);
         return;
       }
+      /* 落笔时刷一次矩形：整笔期间复用，避免每个采样点都触发一次强制布局 */
+      this._rect = cv.getBoundingClientRect();
       try { cv.setPointerCapture(e.pointerId); } catch (err) { /* 合成事件会抛，忽略 */ }
       const t = this.tool;
       const st = { t, c: this.color, w: this.size, pts: [] };
       this._st = st;
+      this._pred = null;
       /* 在落笔前存快照：撤销才能回到「这一笔之前」 */
       this.pushUndo();
       this.strokes.push(st);
       const p = this._pt(e);
       st.pts.push(p[0], p[1], p[2]);
-      this._paintStroke(st);
+      this.drawLive();
     };
-    const move = (e) => {
+
+    /** isRaw=true 来自 pointerrawupdate（平台允许的最高频率，早于被节流的 pointermove） */
+    const move = (e, isRaw) => {
       if (this._delOn) { this.eraseAt(e); return; }
       if (!this._st) return;
-      e.preventDefault();
-      const evs = (typeof e.getCoalescedEvents === 'function' && e.getCoalescedEvents()) || [e];
+      if (!isRaw && this._rawAt && (e.timeStamp || performance.now()) - this._rawAt < 120) {
+        return;   /* 同一批点已经由 raw 处理过，pointermove 别再重复加 */
+      }
+      if (isRaw) this._rawAt = e.timeStamp || performance.now();
+      if (e.cancelable) e.preventDefault();
+
+      /* 注意：getCoalescedEvents() 可能返回空数组（某些实现 / 合成事件），不能直接 || [e] */
+      const list = (typeof e.getCoalescedEvents === 'function' && e.getCoalescedEvents()) || [];
+      const evs = list.length ? list : [e];
       let added = false;
       for (const ev of evs) {
         const p = this._pt(ev);
         const pts = this._st.pts;
-        const lx = pts[pts.length - 3], ly = pts[pts.length - 2];
-        if (Math.hypot(p[0] - lx, p[1] - ly) < 1.2) continue;
+        const lx = pts[pts.length - 3];
+        const ly = pts[pts.length - 2];
+        if (Math.hypot(p[0] - lx, p[1] - ly) < this._minStep()) continue;
         pts.push(p[0], p[1], p[2]);
         added = true;
       }
-      /* 一次 pointermove 里可能合并了多个采样点：整条重画一次就够，
-         以前每个采样点都整幅重画（画布清空→重画所有笔画），高分屏/多笔画时会明显掉帧 */
-      if (added) this.redraw();
+
+      /* 预测点：只画不存，用来补「笔已经走到、画面还没跟上」的那一两帧 */
+      if (typeof e.getPredictedEvents === 'function') {
+        try {
+          const pr = e.getPredictedEvents();
+          this._pred = pr && pr.length ? pr.map((ev) => this._pt(ev)) : null;
+        } catch (err) { this._pred = null; }
+      } else {
+        this._pred = null;
+      }
+
+      /* 一帧只画一次：一帧内可能来 4~8 个采样点，以前每个点都整幅重绘一次 */
+      if (added || this._pred) this._scheduleDraw();
     };
-    const up = () => {
+
+    const up = (e) => {
       this._delOn = false;
       if (!this._st) return;
       const st = this._st;
       this._st = null;
+      this._pred = null;
+      if (this._raf) { cancelAnimationFrame(this._raf); this._raf = 0; }
+
+      /* 抬起前最后一点：raw 模式下可能还没进 strokes，补上（否则笔尾会缺一小段） */
+      if (e && typeof e.clientX === 'number') {
+        const p = this._pt(e);
+        const n = st.pts.length;
+        if (n < 3 || Math.hypot(p[0] - st.pts[n - 3], p[1] - st.pts[n - 2]) > 0.6) {
+          st.pts.push(p[0], p[1], p[2]);
+        }
+      }
       if (st.pts.length < 4) st.pts.push(st.pts[0], st.pts[1], st.pts[2] || 0.5);
-      this.redraw();
+
+      this._commit(st);          /* 这一笔盖进离屏，其它笔画不用重画 */
+      this.drawLive();
+      this._rect = null;
       if (this.onChange) this.onChange();
     };
+
+    /* 高频采样：pointerrawupdate 比 pointermove 更早、更密（Chromium 支持）；
+       不支持的环境退回 pointermove，行为不变 */
+    if ('onpointerrawupdate' in cv) {
+      cv.addEventListener('pointerrawupdate', (e) => move(e, true));
+    }
+    cv.addEventListener('pointermove', (e) => move(e, false));
     cv.addEventListener('pointerdown', down);
-    cv.addEventListener('pointermove', move);
     cv.addEventListener('pointerup', up);
     cv.addEventListener('pointercancel', up);
-    cv.addEventListener('pointerleave', (e) => { if (this._st && e.pointerType === 'mouse') up(); });
+    cv.addEventListener('pointerleave', (e) => { if (this._st && e.pointerType === 'mouse') up(e); });
   }
+
+  /** 两个采样点之间的最小距离，按「屏幕上 1.1px」折算成页面坐标：
+      缩得越小、屏幕越密，阈值越小，保证慢写时也不会把点吃掉 */
+  _minStep() {
+    const w = (this._rect && this._rect.width) || this.cv.clientWidth || this.pageW;
+    return Math.max(0.12, 1.1 * this.pageW / Math.max(1, w));
+  }
+
 
   /* ---------- 整笔删除 ---------- */
   /** 命中阈值按「屏幕 10px」换算成页面坐标，放大时更精确 */
@@ -355,6 +479,8 @@ export class InkBoard {
 
   /* ---------- 导出 ---------- */
   async exportPng(scale = 2) {
+    /* 导出期间会临时把 this.ctx 指向离屏画布，先把待画的帧取消，避免画串 */
+    if (this._raf) { cancelAnimationFrame(this._raf); this._raf = 0; }
     const W = this.pageW * scale, H = this.pageH * scale;
     const c = document.createElement('canvas');
     c.width = W; c.height = H;
@@ -415,6 +541,7 @@ export class InkBoard {
   }
 
   async thumb(maxW = 320) {
+    if (this._raf) { cancelAnimationFrame(this._raf); this._raf = 0; }
     const s = maxW / this.pageW;
     const c = document.createElement('canvas');
     c.width = maxW; c.height = Math.round(this.pageH * s);
