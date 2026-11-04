@@ -3,6 +3,7 @@ import { store, uid, fmtTime } from './store.js';
 import { InkBoard, PAGE_W, PAGE_H, COLORS, SIZES, imageToDataUrl, loadImageFile } from './inkboard.js';
 import { buildNoteJson, parseNoteJson } from './notejson.js';
 import { mdInto } from './md.js';
+import { HwrPad } from './hwrpad.js';
 
 const LS_LAST = 'kynb_last_note';
 const LS_LAST_AT = 'kynb_last_note_at';   /* 最后落盘时间：用来判断「刚写过」要不要自动回到那本 */
@@ -174,6 +175,7 @@ export function initNotebook() {
   const layerAbove = $('inkItemsAbove');
   let selId = null;
   let editingId = null;
+  let activeTextId = null;      /* 手写转文字往哪个文本框里写 */
 
   const pageNow = () => st.pages[st.idx];
 
@@ -212,7 +214,8 @@ export function initNotebook() {
     board.items = p.items;
     p.items.forEach((it) => {
       const el = document.createElement('div');
-      el.className = 'it it-' + it.type + (it.id === selId ? ' on' : '');
+      el.className = 'it it-' + it.type
+        + (it.id === selId ? ' on' : '') + (it.id === activeTextId ? ' cur' : '');
       el.dataset.id = it.id;
       placeItem(el, it);
       if (it.type === 'image') {
@@ -261,6 +264,13 @@ export function initNotebook() {
 
   function startDrag(e, it, el) {
     if (st.tool !== 'sel') return;      /* 写字时不该拖到元素 */
+    /* 点中文本框 = 把手写文字的落点切到这里（像点一下输入框） */
+    if (it.type === 'text' && activeTextId !== it.id) {
+      activeTextId = it.id;
+      document.querySelectorAll('.ink-items .it').forEach((x) => {
+        x.classList.toggle('cur', x.dataset.id === activeTextId);
+      });
+    }
     e.preventDefault();
     e.stopPropagation();
     pickItem(it.id);
@@ -312,8 +322,83 @@ export function initNotebook() {
     toast('已删除元素');
   }
 
+  /* ---------- 手写转文字 ---------- */
+  /** 找到「当前文本框」；没有就新建一个（放在已有文字块下面，没有就靠页面上方） */
+  function targetTextItem(create) {
+    const p = pageNow();
+    if (!p) return null;
+    if (!Array.isArray(p.items)) p.items = [];
+    const it = activeTextId ? p.items.find((x) => x.id === activeTextId && x.type === 'text') : null;
+    if (it) return it;
+    if (!create) return null;
+    const texts = p.items.filter((x) => x.type === 'text');
+    let y = Math.round(PAGE_H * 0.09);
+    if (texts.length) {
+      const bottom = Math.max(...texts.map((t) => t.y + Math.max(80,
+        String(t.text || '').split('\n').length * (t.size || 40) * 1.6)));
+      y = Math.min(Math.round(PAGE_H * 0.72), Math.round(bottom + 24));
+    }
+    const box = {
+      id: uid('it'), type: 'text', z: 'above', text: '', size: 40, color: '#1f1c18',
+      x: 96, y, w: Math.round(PAGE_W * 0.78), h: 120,
+    };
+    p.items.push(box);
+    activeTextId = box.id;
+    return box;
+  }
+
+  /** 新写的字跑到可视区外面去了就滚一下，不然用户会以为没写进去 */
+  function scrollItemIntoView(id) {
+    const el = layerAbove.querySelector(`[data-id="${id}"]`);
+    if (!el) return;
+    const er = el.getBoundingClientRect();
+    const sr = stageEl.getBoundingClientRect();
+    if (er.top >= sr.top + 6 && er.bottom <= sr.bottom - 6) return;
+    el.scrollIntoView({ block: 'center', inline: 'nearest' });
+  }
+
+  function commitHwr(text) {
+    const it = targetTextItem(true);
+    if (!it) return;
+    it.text = (it.text || '') + text;
+    renderItems();
+    saveSoon(true);
+    scrollItemIntoView(it.id);
+  }
+
+  /** 退掉最近上屏的文字（n 个字）；手写板的 ⌫ 和「AI 再看」都用它 */
+  function backHwr(n) {
+    const it = targetTextItem(false);
+    if (!it) return;
+    const t = String(it.text || '');
+    it.text = n > 0 ? t.slice(0, Math.max(0, t.length - n)) : t.slice(0, -1);
+    renderItems();
+    saveSoon(true);
+  }
+
+  const hwr = new HwrPad(
+    {
+      bar: $('hwrBar'), cv: $('hwrCv'), cands: $('hwrCands'), status: $('hwrStatus'),
+      auto: $('hwrAuto'), engine: $('hwrEngine'),
+    },
+    { onCommit: (text) => commitHwr(text), onBack: (n) => backHwr(n) },
+  );
+
+  $('inkHand').onclick = () => {
+    if (!st.note || st.mode === 'md') return;
+    const on = !hwr.open;
+    hwr.show(on);
+    $('inkHand').classList.toggle('on', on);
+    if (on) toast('在手写板上写，认出字直接写进这一页的文本框');
+  };
+  $('hwrClose').onclick = () => { hwr.show(false); $('inkHand').classList.remove('on'); };
+  $('hwrBack').onclick = () => backHwr(1);
+  $('hwrEnter').onclick = () => commitHwr('\n');
+  $('hwrClear').onclick = () => hwr.clear();
+
   function openTextDialog(it) {
     editingId = it ? it.id : null;
+    if (it) activeTextId = it.id;      /* 手写接下来往这个框里写 */
     $('textTitle').textContent = it ? '编辑文字' : '插入文字';
     $('textInput').value = it ? (it.text || '') : '';
     $('textSize').value = String(it ? (it.size || 32) : 32);
@@ -337,11 +422,14 @@ export function initNotebook() {
     if (editingId) {
       const it = p.items.find((x) => x.id === editingId);
       if (it) { it.text = txt; it.size = size; it.color = color; }
+      activeTextId = editingId;
     } else {
-      p.items.push({
+      const box = {
         id: uid('it'), type: 'text', z: 'above', text: txt, size, color,
         x: Math.round(PAGE_W * 0.1), y: Math.round(PAGE_H * 0.12), w: Math.round(PAGE_W * 0.8), h: 120,
-      });
+      };
+      p.items.push(box);
+      activeTextId = box.id;         /* 接着用「✍ 手写」就往这里追加 */
     }
     editingId = null;
     $('dlgText').close();
@@ -505,6 +593,7 @@ export function initNotebook() {
     const p = st.pages[st.idx];
     if (!Array.isArray(p.items)) p.items = [];
     selId = null;
+    activeTextId = null;      /* 换页了，手写文字重新找个框 */
     board.loadPage({ template: p.template, bg: p.bg, strokes: p.strokes, items: p.items });
     renderItems();
     tplSel.value = p.template || 'blank';
@@ -565,6 +654,8 @@ export function initNotebook() {
     $('inkTools').hidden = true;
     $('inkStage').hidden = true;
     $('inkMd').hidden = false;
+    hwr.show(false);
+    $('inkHand').classList.remove('on');
     $('inkToMap').hidden = false;
     $('inkExportPng').hidden = true;
     pageInfo.textContent = '文字笔记';
@@ -633,6 +724,9 @@ export function initNotebook() {
     st.pages = [];
     st.mode = 'ink';
     st.md = '';
+    activeTextId = null;
+    hwr.show(false);
+    $('inkHand').classList.remove('on');
     $('inkMd').hidden = true;
     $('inkTools').hidden = false;
     $('inkStage').hidden = false;
@@ -1062,8 +1156,11 @@ export function initNotebook() {
     return id;
   }
 
-  const api = { renderLib, newNote, openNote, board, state: st, addBgPage, addBgNote, addMdNote, toast };
+  const api = { renderLib, newNote, openNote, board, hwr, state: st, addBgPage, addBgNote, addMdNote, toast,
+    renderItems, setHud: (on) => board.setHud(on) };
   noteApi = api;
+  /* 上次开了延迟面板就继续开着（调试用，不影响写字） */
+  try { if (localStorage.getItem('kynb_hud') === '1') board.setHud(true); } catch (e) { /* 无痕模式 */ }
   return api;
 }
 

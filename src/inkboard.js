@@ -44,6 +44,9 @@ export class InkBoard {
     this._k = 1;      // 页面坐标 → 设备像素
     this._s = 1;      // 页面坐标 → CSS 像素
     this.onChange = null;
+    this.hud = null;                 /* 调试用的延迟面板 */
+    this._lag = { n: 0, sum: 0, max: 0 };
+    this._fps = { t: 0, n: 0, v: 0 };
     this._ro = null;
     this._bind();
     this._observe();
@@ -195,14 +198,26 @@ export class InkBoard {
     const ctx = this.ctx;
     const W = this.cv.width;
     const H = this.cv.height;
+    const t0 = performance.now();
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, W, H);
     ctx.drawImage(this._off, 0, 0);
     const st = this._st;
-    if (!st) return;
-    ctx.setTransform(this._k, 0, 0, this._k, 0, 0);
-    this._paintStroke(st);
-    this._paintPredicted(ctx, st);
+    if (st) {
+      ctx.setTransform(this._k, 0, 0, this._k, 0, 0);
+      this._paintStroke(st);
+      this._paintPredicted(ctx, st);
+    }
+    /* FPS 统计（只喂给延迟面板） */
+    const now = performance.now();
+    if (now - this._fps.t > 500) {
+      if (this._fps.t) this._fps.v = Math.round(this._fps.n * 1000 / (now - this._fps.t));
+      this._fps.t = now;
+      this._fps.n = 0;
+    } else {
+      this._fps.n++;
+    }
+    this._frameMs = performance.now() - t0;
   }
 
   /** 笔尾的预测段：只为「看起来跟手」，不进 strokes 数据，下一帧自然被真实点覆盖 */
@@ -225,9 +240,18 @@ export class InkBoard {
   }
 
   _scheduleDraw() {
+    /* 一帧只画一次，但别干等 rAF：事件到的时候如果距上一笔已经过了 10ms，
+       就直接画（下一帧 vsync 立刻能看到），能省掉最多一整帧的等待 */
+    const now = performance.now();
+    if (!this._raf && now - (this._lastDraw || 0) >= 10) {
+      this._lastDraw = now;
+      this.drawLive();
+      return;
+    }
     if (this._raf) return;
     this._raf = requestAnimationFrame(() => {
       this._raf = 0;
+      this._lastDraw = performance.now();
       this.drawLive();
     });
   }
@@ -293,6 +317,14 @@ export class InkBoard {
       }
       if (isRaw) this._rawAt = e.timeStamp || performance.now();
       if (e.cancelable) e.preventDefault();
+      if (this.hud && isRaw && e.timeStamp) {
+        const lag = performance.now() - e.timeStamp;
+        if (lag >= 0 && lag < 400) {
+          this._lag.n++;
+          this._lag.sum += lag;
+          if (lag > this._lag.max) this._lag.max = lag;
+        }
+      }
 
       /* 注意：getCoalescedEvents() 可能返回空数组（某些实现 / 合成事件），不能直接 || [e] */
       const list = (typeof e.getCoalescedEvents === 'function' && e.getCoalescedEvents()) || [];
@@ -344,6 +376,7 @@ export class InkBoard {
       this.drawLive();
       this._rect = null;
       if (this.onChange) this.onChange();
+      if (this.hud) this._hudUpdate(st);
     };
 
     /* 高频采样：pointerrawupdate 比 pointermove 更早、更密（Chromium 支持）；
@@ -395,6 +428,30 @@ export class InkBoard {
   }
 
   /** 删掉命中的笔画（可拖动连续删）；一次拖动只记一次撤销 */
+  /* ---------- 输入延迟面板（设置里可开，用来判断「不跟手」卡在哪一环） ---------- */
+  setHud(on) {
+    if (!on) {
+      if (this.hud) { this.hud.remove(); this.hud = null; }
+      return;
+    }
+    if (this.hud) return;
+    const d = document.createElement('div');
+    d.className = 'ink-hud';
+    d.textContent = '写一笔看数据';
+    document.body.appendChild(d);
+    this.hud = d;
+  }
+
+  _hudUpdate(st) {
+    const l = this._lag;
+    const avg = l.n ? (l.sum / l.n) : 0;
+    const pts = Math.floor(st.pts.length / 3);
+    this.hud.innerHTML = `输入延迟 平均 <b>${avg.toFixed(1)}</b>ms / 峰值 ${l.max.toFixed(0)}ms<br>`
+      + `本笔 ${pts} 点 · 绘制 ${(this._frameMs || 0).toFixed(1)}ms · ${this._fps.v || 0}fps`;
+    l.n = 0; l.sum = 0; l.max = 0;
+    if (st.t === 'er') return;
+  }
+
   eraseAt(e) {
     if (!this.strokes.length) return false;
     const [x, y] = this._pt(e);

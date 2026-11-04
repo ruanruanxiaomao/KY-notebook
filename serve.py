@@ -27,6 +27,13 @@ from urllib.parse import parse_qs, urlparse
 ROOT = os.path.dirname(os.path.abspath(__file__))
 PASS_HEADERS = ("Content-Type", "Authorization", "x-opencode-session", "Accept")
 
+# 手写识别要用：wasm 必须给 application/wasm，不然 WebAssembly.instantiateStreaming 会失败回落
+SimpleHTTPRequestHandler.extensions_map.update({
+    ".wasm": "application/wasm",
+    ".mjs": "text/javascript",
+    ".onnx": "application/octet-stream",
+})
+
 
 class Handler(SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):

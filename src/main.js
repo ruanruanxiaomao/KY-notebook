@@ -4,6 +4,7 @@ import { initShot } from './shot.js';
 import { initAnnot } from './annot.js';
 import { initMap } from './mapview.js';
 import { getCfg, setCfg, listModels } from './ai.js';
+import { getHwrCfg, setHwrCfg } from './hwr.js';
 import { getPrompts, setPrompts, resetPrompts, DEFAULT_PROMPTS } from './prompts.js';
 
 const $ = (id) => document.getElementById(id);
@@ -39,6 +40,8 @@ $('btnSettings').onclick = () => {
   $('cfgKey').value = c.apiKey || '';
   $('cfgModel').value = c.model || '';
   $('cfgVision').checked = !!c.vision;
+  $('cfgIdle').value = String(getHwrCfg().idle);
+  try { $('cfgHud').checked = localStorage.getItem('kynb_hud') === '1'; } catch (e) { $('cfgHud').checked = false; }
   $('cfgModelList').innerHTML = '';
   $('cfgFetchStatus').textContent = '';
   dlgSettings.showModal();
@@ -51,6 +54,13 @@ $('cfgSave').onclick = () => {
     model: $('cfgModel').value,
     vision: $('cfgVision').checked,
   });
+  const hc = getHwrCfg();
+  hc.idle = Number($('cfgIdle').value) || 600;
+  setHwrCfg(hc);
+  if (notebook.hwr) notebook.hwr.idle = hc.idle;
+  const hud = !!$('cfgHud').checked;
+  try { localStorage.setItem('kynb_hud', hud ? '1' : '0'); } catch (e) { /* 忽略 */ }
+  notebook.setHud(hud);
 };
 
 /* 从接口拉模型列表：填进 datalist，输入框可直接下拉选 */

@@ -6,6 +6,7 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.util.Log;
+import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.WindowInsets;
@@ -27,6 +28,7 @@ public class MainActivity extends Activity {
   private WebView wv;
   private LocalServer server;
   private ValueCallback<Uri[]> fileCb;
+  private static boolean loggedPen = false;
 
   @Override protected void onCreate(Bundle state) {
     super.onCreate(state);
@@ -93,6 +95,28 @@ public class MainActivity extends Activity {
     }
     setContentView(wv, new ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
     wv.loadUrl(server.baseUrl());
+  }
+
+  /**
+   * 触控笔跟手度（这一条是「比系统输入法钝」的根因）：
+   * Android 默认把一帧内的所有 ACTION_MOVE 合并成一个 MotionEvent 再派发，
+   * 屏幕刷新 60Hz、笔采样 240Hz，用户看到的就是「笔尖已经走了、线还没跟上」。
+   * 按下时对 DecorView 调 requestUnbufferedDispatch，事件到就派发，不再攒一帧。
+   * 只对笔（含笔尾橡皮）这么做：手指仍走系统的批处理，列表滚动不受影响。
+   */
+  @Override public boolean dispatchTouchEvent(MotionEvent ev) {
+    if (Build.VERSION.SDK_INT >= 21 && ev.getActionMasked() == MotionEvent.ACTION_DOWN) {
+      try {
+        int tt = ev.getPointerCount() > 0 ? ev.getToolType(0) : MotionEvent.TOOL_TYPE_UNKNOWN;
+        if (tt == MotionEvent.TOOL_TYPE_STYLUS || tt == MotionEvent.TOOL_TYPE_ERASER) {
+          getWindow().getDecorView().requestUnbufferedDispatch(ev);
+          if (!loggedPen) { loggedPen = true; Log.i(TAG, "pen detected: unbuffered dispatch on (toolType=" + tt + ")"); }
+        }
+      } catch (Throwable t) {
+        Log.w(TAG, "requestUnbufferedDispatch: " + t);
+      }
+    }
+    return super.dispatchTouchEvent(ev);
   }
 
   @Override protected void onActivityResult(int req, int res, Intent data) {

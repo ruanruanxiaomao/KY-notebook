@@ -154,6 +154,9 @@ class LocalServer {
     if (n.endsWith(".svg")) return "image/svg+xml";
     if (n.endsWith(".ico")) return "image/x-icon";
     if (n.endsWith(".pdf")) return "application/pdf";
+    if (n.endsWith(".wasm")) return "application/wasm";   // 少了它 WebAssembly.instantiateStreaming 会失败（虽然会回落，但慢一截）
+    if (n.endsWith(".onnx")) return "application/octet-stream";
+    if (n.endsWith(".txt")) return "text/plain; charset=utf-8";
     if (n.endsWith(".woff2")) return "font/woff2";
     if (n.endsWith(".webmanifest")) return "application/manifest+json";
     return "application/octet-stream";

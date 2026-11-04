@@ -60,7 +60,7 @@ ICON_MAP = [('mipmap-mdpi-v4', 48), ('mipmap-hdpi-v4', 72), ('mipmap-xhdpi-v4', 
 
 # 网页要打进去的东西：index.html + src/*.js（demo 没有打包步骤，直接照搬）
 WEB_FILES = ['index.html']
-WEB_DIRS = ['src']
+WEB_DIRS = ['src', 'vendor']
 
 
 def log(msg):
@@ -99,7 +99,8 @@ def collect_web():
         root = os.path.join(PROJECT, d)
         for dirpath, _, files in os.walk(root):
             for fn in files:
-                if not fn.endswith(('.js', '.css', '.json', '.png', '.svg', '.woff2', '.webmanifest')):
+                if not fn.endswith(('.js', '.css', '.json', '.png', '.svg', '.woff2', '.webmanifest',
+                                    '.mjs', '.wasm', '.onnx', '.txt')):
                     continue
                 full = os.path.join(dirpath, fn)
                 rel = os.path.relpath(full, PROJECT).replace('\\', '/')

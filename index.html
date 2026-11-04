@@ -76,6 +76,7 @@
           <button class="tool" id="inkClear" title="清空本页">⌫</button>
         </div>
         <div class="group">
+          <button class="tool" id="inkHand" title="手写转文字：在下面的板子里写字，自动变成文字写进这页的文本框">✍</button>
           <button class="tool" id="inkAddText" title="插入文字块">T</button>
           <button class="tool" id="inkAddImage" title="插入图片到本页">🖼</button>
           <button class="tool" id="inkAddPdf" title="插入 PDF（每页追加成新的一页，可直接批注）">📄</button>
@@ -112,6 +113,26 @@
           <canvas id="inkCv"></canvas>
           <div class="ink-items above" id="inkItemsAbove"></div>
         </div>
+      </div>
+
+      <!-- 手写转文字：像输入法一样写在板子里，认出字直接写进本页文本框 -->
+      <div class="hwr-bar" id="hwrBar" hidden>
+        <div class="hwr-head">
+          <span class="hwr-title">✍ 手写转文字</span>
+          <label class="chk"><input type="checkbox" id="hwrAuto" checked> 自动上屏</label>
+          <select class="hwr-engine" id="hwrEngine" title="离线：本机识别，一行 ~0.3 秒；AI：更会认连笔和中英混排，但要联网">
+            <option value="local">离线识别</option>
+            <option value="ai">AI 识别</option>
+          </select>
+          <span class="hwr-status" id="hwrStatus"></span>
+          <span class="spacer"></span>
+          <button class="tool" id="hwrBack" title="删掉刚写进去的一个字">⌫</button>
+          <button class="tool" id="hwrEnter" title="换行">↵</button>
+          <button class="tool" id="hwrClear" title="清空板子">🧹</button>
+          <button class="tool" id="hwrClose" title="收起手写板">✕</button>
+        </div>
+        <canvas id="hwrCv"></canvas>
+        <div class="hwr-cands" id="hwrCands"></div>
       </div>
 
       <!-- 文字笔记（AI 生成 / 手改的 markdown） -->
@@ -399,7 +420,13 @@
       <button class="btn ghost mini" type="button" id="cfgFetch">从接口拉取模型列表</button>
       <span class="status" id="cfgFetchStatus"></span>
     </div>
-    <label class="check"><input type="checkbox" id="cfgVision"> 这个模型支持看图（拍题 / 图片解析需要）</label>
+    <label class="check"><input type="checkbox" id="cfgVision"> 这个模型支持看图（拍题 / 图片解析 / 手写 AI 识别需要）</label>
+    <div class="row" style="align-items:center;gap:10px">
+      <label class="field" style="flex:1">手写识别停笔多久开始（毫秒）
+        <input id="cfgIdle" type="number" min="200" max="2000" step="50" value="600">
+      </label>
+      <label class="check" style="margin-top:14px"><input type="checkbox" id="cfgHud"> 显示笔迹延迟面板</label>
+    </div>
     <div class="row end">
       <button class="btn ghost" value="cancel">取消</button>
       <button class="btn primary" id="cfgSave" value="save">保存</button>
