@@ -1,5 +1,7 @@
 # 本地测试产物
 _test.pdf
+new_yorker*.pdf
+test*.pdf
 *.log
 
 # 系统 / 编辑器
