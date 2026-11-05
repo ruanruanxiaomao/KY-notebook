@@ -313,6 +313,9 @@ class LocalServer {
       writeText(out, 400, "proxy: bad url");
       return;
     }
+    /* http 目标走原始 Socket：Android 9+ 默认禁止明文 HTTP，HttpURLConnection 连局域网会被
+       NetworkSecurityPolicy 拦掉；Socket 层没这个限制（也是「连电脑」能用起来的前提）。 */
+    if (url.startsWith("http://")) { proxyRaw(out, url, hdr, body); return; }
     HttpURLConnection conn = null;
     try {
       conn = (HttpURLConnection) new URL(url).openConnection();
@@ -360,6 +363,116 @@ class LocalServer {
       writeText(out, 502, "proxy failed: " + t);
     } finally {
       if (conn != null) conn.disconnect();
+    }
+  }
+
+  private static int indexOfFrom(byte[] all, byte[] pat, int from) {
+    outer:
+    for (int i = Math.max(0, from); i + pat.length <= all.length; i++) {
+      for (int j = 0; j < pat.length; j++) if (all[i + j] != pat[j]) continue outer;
+      return i;
+    }
+    return -1;
+  }
+
+  private static byte[] dechunk(byte[] all, int start) {
+    ByteArrayOutputStream bos = new ByteArrayOutputStream();
+    byte[] crlf = "\r\n".getBytes(StandardCharsets.UTF_8);
+    int p = start;
+    while (p < all.length) {
+      int e = indexOfFrom(all, crlf, p);
+      if (e < 0) break;
+      String line = new String(all, p, e - p, StandardCharsets.UTF_8).trim();
+      int semi = line.indexOf(';');
+      if (semi >= 0) line = line.substring(0, semi);
+      int len;
+      try { len = Integer.parseInt(line, 16); } catch (Throwable t) { break; }
+      if (len <= 0) break;
+      int s0 = e + 2;
+      int s1 = Math.min(all.length, s0 + len);
+      bos.write(all, s0, s1 - s0);
+      p = s1 + 2;
+    }
+    return bos.toByteArray();
+  }
+
+  /** http:// 目标：自己发请求、自己读响应，绕开明文限制 */
+  private void proxyRaw(OutputStream out, String url, Map<String, String> hdr, byte[] body) throws IOException {
+    java.net.Socket s = new java.net.Socket();
+    try {
+      java.net.URL u = new java.net.URL(url);
+      String host = u.getHost();
+      int port = u.getPort() > 0 ? u.getPort() : 80;
+      String path = u.getFile();
+      if (path == null || path.isEmpty()) path = "/";
+      s.connect(new java.net.InetSocketAddress(host, port), 20000);
+      s.setSoTimeout(300000);
+
+      StringBuilder h = new StringBuilder();
+      h.append(body.length > 0 ? "POST " : "GET ").append(path).append(" HTTP/1.1\r\n");
+      h.append("Host: ").append(host);
+      if (port != 80) h.append(':').append(port);
+      h.append("\r\nConnection: close\r\nAccept-Encoding: identity\r\nUser-Agent: KY-notebook\r\n");
+      for (Map.Entry<String, String> e : hdr.entrySet()) {
+        String k = e.getKey().toLowerCase(Locale.ROOT);
+        if (k.equals("host") || k.equals("connection") || k.equals("content-length")
+            || k.equals("accept-encoding")) continue;
+        if (k.equals("authorization") || k.equals("content-type") || k.equals("accept") || k.startsWith("x-")) {
+          h.append(e.getKey()).append(": ").append(e.getValue()).append("\r\n");
+        }
+      }
+      if (body.length > 0) h.append("Content-Length: ").append(body.length).append("\r\n");
+      h.append("\r\n");
+
+      OutputStream os = s.getOutputStream();
+      os.write(h.toString().getBytes(StandardCharsets.UTF_8));
+      if (body.length > 0) os.write(body);
+      os.flush();
+
+      InputStream is = s.getInputStream();
+      ByteArrayOutputStream bos = new ByteArrayOutputStream();
+      byte[] buf = new byte[16384];
+      int n;
+      while ((n = is.read(buf)) > 0) bos.write(buf, 0, n);
+      byte[] all = bos.toByteArray();
+      int sep = indexOfFrom(all, "\r\n\r\n".getBytes(StandardCharsets.UTF_8), 0);
+      if (sep < 0) { writeText(out, 502, "proxy: 电脑返回的内容不完整"); return; }
+
+      String headText = new String(all, 0, sep, StandardCharsets.UTF_8);
+      int bodyStart = sep + 4;
+      int code = 200;
+      String ct = "application/json; charset=utf-8";
+      boolean chunked = false;
+      String[] lines = headText.split("\r\n");
+      if (lines.length > 0) {
+        String[] parts = lines[0].split(" ");
+        if (parts.length >= 2) { try { code = Integer.parseInt(parts[1]); } catch (Throwable t) { /* 忽略 */ } }
+      }
+      for (int i = 1; i < lines.length; i++) {
+        int c = lines[i].indexOf(':');
+        if (c <= 0) continue;
+        String k = lines[i].substring(0, c).trim().toLowerCase(Locale.ROOT);
+        String v = lines[i].substring(c + 1).trim();
+        if (k.equals("content-type")) ct = v;
+        else if (k.equals("transfer-encoding") && v.toLowerCase(Locale.ROOT).contains("chunked")) chunked = true;
+      }
+      byte[] data = chunked ? dechunk(all, bodyStart)
+          : java.util.Arrays.copyOfRange(all, bodyStart, all.length);
+
+      byte[] head = ("HTTP/1.1 " + code + " " + (code == 200 ? "OK" : "ERR") + "\r\n"
+          + "Content-Type: " + ct + "\r\n"
+          + "Content-Length: " + data.length + "\r\n"
+          + "Cache-Control: no-store\r\n"
+          + "Access-Control-Allow-Origin: *\r\n"
+          + "Connection: close\r\n\r\n").getBytes(StandardCharsets.UTF_8);
+      out.write(head);
+      out.write(data);
+      out.flush();
+      Log.i(TAG, "proxy raw " + host + ":" + port + path + " -> " + code + " " + data.length + "B");
+    } catch (Throwable t) {
+      writeText(out, 502, "proxy failed: " + t);
+    } finally {
+      try { s.close(); } catch (Throwable ignored) { /* 忽略 */ }
     }
   }
 

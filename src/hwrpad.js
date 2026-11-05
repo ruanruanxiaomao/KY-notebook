@@ -2,7 +2,8 @@
    自己画一个小画布：只画笔画折线，抬笔后停 idle 毫秒自动识别，
    识别结果按「自动上屏 / 点候选上屏」两种情况交给外面。
 */
-import { inkToCanvas, recognizeLocal, recognizeAI, getHwrCfg, setHwrCfg, ensureLocalEngine } from './hwr.js';
+import { inkToCanvas, recognizeLocal, recognizeAI, getHwrCfg, setHwrCfg, ensureLocalEngine,
+  isPunctLike, guessPunct } from './hwr.js';
 import { chat, getCfg } from './ai.js';
 
 export class HwrPad {
@@ -202,6 +203,13 @@ export class HwrPad {
         r = await recognizeLocal(ink);
       }
       this.setStatus('');
+      /* 标点兜底：手写板上写一个「，」「。」模型常返回空或乱码，按形状补一个 */
+      if (!r.text || !/^[，。？！：；、,.?!:;]+$/.test(r.text)) {
+        if (isPunctLike(snapshot, 0)) {
+          const g = guessPunct(snapshot, 0);
+          if (g) { r.text = g; r.score = 0.4; }
+        }
+      }
       if (!r.text) {
         if (!this.strokes.length) this.strokes = snapshot;   // 没认出来就把笔迹还回去
         this.paint();

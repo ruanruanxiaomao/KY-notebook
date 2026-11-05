@@ -26,6 +26,7 @@
     <button class="tab" data-tab="map">思维导图</button>
   </nav>
   <div class="spacer"></div>
+  <button class="btn ghost" id="btnAgent" title="连电脑：用电脑上的语料和 Agent 生成笔记">✨ 生成</button>
   <button class="btn ghost" id="btnPrompts" title="管理提示词">提示词</button>
   <button class="btn ghost" id="btnSettings" title="设置 AI 接口">设置</button>
 </header>
@@ -142,8 +143,30 @@
         <button data-act="plus" title="字号大一点">A+</button>
         <button data-act="whole" title="选中整块文字（不然是按字选）">整块</button>
         <button data-act="edit" title="改文字内容">改字</button>
+        <button data-act="fmt" title="排版：对齐 / 等距 / 统一字号 / 整理本页">排版</button>
         <button data-act="del" class="danger" title="删掉这块内容">删除</button>
         <span class="itbar-info"></span>
+      </div>
+
+      <!-- 排版面板：选中两块以上时用 -->
+      <div class="fmtbar" id="fmtBar" hidden>
+        <span class="lbl">横向</span>
+        <button data-align="left" title="左对齐">左</button>
+        <button data-align="hcenter" title="水平居中">中</button>
+        <button data-align="right" title="右对齐">右</button>
+        <span class="lbl">纵向</span>
+        <button data-align="top" title="顶端对齐">上</button>
+        <button data-align="vcenter" title="垂直居中">中</button>
+        <button data-align="bottom" title="底端对齐">下</button>
+        <span class="sep"></span>
+        <button data-dist="v" class="txt" title="竖直方向等距分布（至少 3 块）">竖等距</button>
+        <button data-dist="h" class="txt" title="水平方向等距分布（至少 3 块）">横等距</button>
+        <span class="sep"></span>
+        <button data-fmt="same" class="txt" title="统一成第一块的字号">统一字号</button>
+        <button data-fmt="gapdown" class="txt" title="行距小一点">行距−</button>
+        <button data-fmt="gapup" class="txt" title="行距大一点">行距＋</button>
+        <button data-fmt="tidy" class="txt" title="把本页文字按行归拢：左边界对齐、行距统一、超宽自动折行">整理本页</button>
+        <button data-fmt="close" title="收起">✕</button>
       </div>
 
       <!-- 手写转文字：像输入法一样写在板子里，认出字直接写进本页文本框 -->
@@ -479,20 +502,132 @@
     </div>
     <input type="file" id="cfgSysFontInput" accept=".ttf,.otf,font/ttf,font/otf" hidden>
     <div class="row" style="align-items:center;gap:10px">
-      <label class="field" style="flex:1">手写识别停笔多久开始（毫秒）
-        <input id="cfgIdle" type="number" min="200" max="2000" step="50" value="600">
+      <label class="field" style="flex:1">识别出来的字多大
+        <select id="cfgHwrSize">
+          <option value="0">跟随笔迹（默认）</option>
+          <option value="26">小 26</option>
+          <option value="32">偏小 32</option>
+          <option value="38">中 38</option>
+          <option value="44">大 44</option>
+          <option value="52">特大 52</option>
+          <option value="-1">自定义…</option>
+        </select>
       </label>
-      <label class="check" style="margin-top:14px"><input type="checkbox" id="cfgHud"> 显示笔迹延迟面板</label>
+      <input id="cfgHwrSizeCustom" type="number" min="10" max="160" step="1" placeholder="px" hidden
+             style="width:74px;flex:none">
     </div>
+    <div class="row" style="align-items:center;gap:10px">
+      <label class="field" style="flex:1">行距
+        <select id="cfgHwrGap">
+          <option value="1.2">紧凑 1.2</option>
+          <option value="1.35">标准 1.35</option>
+          <option value="1.6">宽松 1.6</option>
+          <option value="1.9">很宽 1.9</option>
+        </select>
+      </label>
+      <label class="field" style="flex:1">整段对齐
+        <select id="cfgHwrAlign">
+          <option value="left">左对齐</option>
+          <option value="center">居中</option>
+          <option value="right">右对齐</option>
+        </select>
+      </label>
+    </div>
+    <div class="row" style="align-items:center;gap:8px">
+      <button class="btn ghost mini" type="button" id="cfgHwrApply"
+              title="把上面的字号和行距用到现在这一页的所有文字上">用到本页所有文字</button>
+      <span class="status" id="cfgHwrApplyStatus"></span>
+    </div>
+    <p class="hint" style="margin:2px 0 6px">识别出来的字默认按「一行一块、行距统一、左边界对齐」排；改完字号点一下上面的按钮，这一页已有的字也会跟着变。</p>
+    <div class="row" style="align-items:center;gap:10px">
+      <label class="field" style="flex:1">停笔多久开始识别（毫秒）
+        <input id="cfgIdle" type="number" min="200" max="3000" step="50" value="800">
+      </label>
+      <label class="field" style="flex:1">停笔多久算写完一行
+        <select id="cfgCommit">
+          <option value="4000">4 秒（写得快）</option>
+          <option value="6000">6 秒</option>
+          <option value="8000">8 秒（推荐）</option>
+          <option value="12000">12 秒（常停下来想）</option>
+          <option value="20000">20 秒（一边想一边写）</option>
+        </select>
+      </label>
+    </div>
+    <p class="hint" style="margin:0 0 6px">左边：抬笔后多久开始认字。写一个字的笔画之间常要停一下，这个值太小会把半个字先认上去（默认 800ms，跟 Windows 手写一致；写得慢就调到 1200）。右边：停笔多久算这一行写完，太快会把一个字拆成好几块。</p>
+    <label class="check" style="margin-top:2px"><input type="checkbox" id="cfgHud"> 显示笔迹延迟面板</label>
     <div class="row">
       <button class="btn ghost mini" type="button" id="cfgOpenPad" title="在手写板上写，认出来写进当前页的文本框">打开底部手写板</button>
       <span class="status" id="cfgPadStatus"></span>
+    </div>
+    <h3 style="margin:18px 0 6px">电脑 Agent（用电脑里的语料生成笔记）</h3>
+    <p class="hint" style="margin:0 0 8px">电脑上先跑 <code>python bridge/serve.py</code>，手机和电脑连同一个 WiFi。手机只把「指令 + 选中的文件」发过去，生成结果存在手机本地。</p>
+    <div class="row" style="align-items:center;gap:8px">
+      <label class="field" style="flex:1">电脑地址
+        <input id="cfgAgUrl" placeholder="http://192.168.1.5:8787" autocomplete="off" spellcheck="false">
+      </label>
+      <label class="field" style="width:110px;flex:none">口令
+        <input id="cfgAgToken" placeholder="6 位" autocomplete="off" spellcheck="false">
+      </label>
+    </div>
+    <div class="row" style="align-items:center;gap:8px">
+      <button class="btn ghost mini" type="button" id="cfgAgTest">测试连接</button>
+      <span class="status" id="cfgAgStatus"></span>
     </div>
     <div class="row end">
       <button class="btn ghost" value="cancel">取消</button>
       <button class="btn primary" id="cfgSave" value="save">保存</button>
     </div>
   </form>
+</dialog>
+
+<!-- ============ 用电脑生成笔记 ============ -->
+<dialog id="dlgAgent" class="dlg wide">
+  <div class="dlg-body">
+    <div class="dlg-head">
+      <h3>✨ 用电脑生成笔记</h3>
+      <button class="dlg-x" id="agX" title="关闭">✕</button>
+    </div>
+    <p class="hint" style="margin:0 0 8px">电脑上跑着 <code>bridge/serve.py</code> 时，可以让它读你电脑里的 PDF / Word / 课件，按指令写成笔记或导图，再存到手机里。</p>
+
+    <div class="ag-inbox" id="agInbox" hidden>
+      <button class="btn primary mini" type="button" id="agInboxBtn">从电脑收下笔记</button>
+      <span class="status" id="agInboxStatus"></span>
+    </div>
+
+    <label class="field">要写什么
+      <textarea id="agIns" rows="3" placeholder="例如：把这份讲义整理成考研复习提纲，按章节分，公式保留 LaTeX，重点标出来"></textarea>
+    </label>
+
+    <div class="row" style="align-items:center;gap:8px">
+      <label class="field" style="flex:1">生成成
+        <select id="agKind">
+          <option value="note">文字笔记（Markdown）</option>
+          <option value="map">思维导图</option>
+        </select>
+      </label>
+      <button class="btn ghost mini" type="button" id="agPing" title="重新连一次电脑">测试电脑</button>
+      <span class="status" id="agStatus"></span>
+    </div>
+
+    <div class="ag-files">
+      <div class="ag-files-head">
+        <span>电脑上的语料</span>
+        <span class="spacer"></span>
+        <button class="btn ghost mini" type="button" id="agUp">↑ 上一级</button>
+        <button class="btn ghost mini" type="button" id="agReload">刷新</button>
+      </div>
+      <div class="ag-path" id="agPath">/</div>
+      <div class="ag-list" id="agList"></div>
+      <div class="ag-chosen" id="agChosen"></div>
+    </div>
+
+    <div class="row end">
+      <button class="btn ghost" type="button" id="agClose">取消</button>
+      <button class="btn primary" type="button" id="agGo">生成</button>
+    </div>
+
+    <div class="ag-preview" id="agPrev" hidden></div>
+  </div>
 </dialog>
 
 <!-- ============ 提示词 ============ -->

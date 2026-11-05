@@ -46,6 +46,7 @@ export class InkBoard {
     this._s = 1;      // 页面坐标 → CSS 像素
     this.onChange = null;
     this.onStrokeEnd = null;         /* 抬笔后回调：画布自动转文字要用 */
+    this.onStrokeStart = null;       /* 落笔回调：正在等的「开始识别」定时器要先停掉（新笔画=还在写同一个字） */
     this.onItemsChanged = null;      /* 撤销恢复了元素：交给上层重画 DOM */
     this.hud = null;                 /* 调试用的延迟面板 */
     this._lag = { n: 0, sum: 0, max: 0 };
@@ -146,7 +147,11 @@ export class InkBoard {
     this.redraw();
   }
 
-  getStrokes() { return this.strokes.map((s) => ({ t: s.t, c: s.c, w: s.w, pts: s.pts.slice() })); }
+  /** 存盘用的笔画：排除「已经变成文字、暂时藏起来」的那些，否则重开会墨迹+文字重影 */
+  getStrokes() {
+    return this.strokes.filter((s) => !this.hidden.has(s))
+      .map((s) => ({ t: s.t, c: s.c, w: s.w, pts: s.pts.slice() }));
+  }
   isEmpty() { return this.strokes.length === 0; }
 
   /* ---------- 绘制 ---------- */
@@ -374,6 +379,7 @@ export class InkBoard {
       }
       /* 落笔时刷一次矩形：整笔期间复用，避免每个采样点都触发一次强制布局 */
       this._rect = cv.getBoundingClientRect();
+      if (this.onStrokeStart) this.onStrokeStart();
       try { cv.setPointerCapture(e.pointerId); } catch (err) { /* 合成事件会抛，忽略 */ }
       const t = this.tool;
       const st = { t, c: this.color, w: this.size, pts: [], seed: (Math.random() * 997) | 0 };
@@ -656,7 +662,9 @@ export class InkBoard {
 
   _paintText(ctx, it, k) {
     const size = Math.max(6, (it.size || 28) * k);
-    const lh = size * 1.55;
+    /* 行距跟屏幕上的 .tx 用同一个值（以前这里写死 1.55，导出比屏幕松，看着不齐） */
+    const lhK = Math.max(1.05, Math.min(3, Number(it.lh) || 1.3));
+    const lh = size * lhK;
     const maxW = Math.max(10, it.w * k);
     ctx.save();
     ctx.font = `${size}px ${this.textFont || 'system-ui, sans-serif'}`;

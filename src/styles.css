@@ -442,7 +442,9 @@ main{height:calc(100% - 54px)}
 .stage.texting{cursor:text}
 
 /* ---------- 识别候选条 ---------- */
-.candbar{position:fixed;z-index:61;display:flex;align-items:center;gap:5px;padding:5px 6px;
+/* 候选条固定在屏幕下方中间：不跟着文字走，就不会挡住正在写的那一行 */
+.candbar{position:fixed;z-index:61;left:50%;transform:translateX(-50%);bottom:96px;
+  display:flex;align-items:center;gap:5px;padding:5px 6px;
   border-radius:10px;background:rgba(28,24,20,.94);box-shadow:0 6px 20px rgba(0,0,0,.26);
   max-width:min(92vw,640px);overflow-x:auto;touch-action:manipulation}
 .candbar button{border:0;border-radius:7px;padding:5px 9px;font-size:14px;line-height:1.2;
@@ -452,3 +454,57 @@ main{height:calc(100% - 54px)}
 .candbar button.ai:hover{background:#173c5e}
 .candbar button.close{background:transparent;color:#d8cbb6;font-size:12px}
 .candbar .lbl{color:#d8cbb6;font-size:11.5px;padding:0 2px}
+
+/* ---------- 排版面板（对齐 / 等距 / 统一字号 / 整理本页） ---------- */
+.fmtbar{position:fixed;z-index:62;left:50%;transform:translateX(-50%);bottom:84px;
+  display:flex;align-items:center;gap:3px;padding:5px 6px;
+  border-radius:10px;background:rgba(28,24,20,.95);box-shadow:0 8px 24px rgba(0,0,0,.30);
+  max-width:min(94vw,700px);overflow-x:auto;touch-action:manipulation}
+.fmtbar button{border:0;border-radius:7px;padding:5px 8px;font-size:14px;line-height:1.1;
+  cursor:pointer;background:#fff;color:var(--ink);font-family:var(--ui-font);white-space:nowrap}
+.fmtbar button:hover{background:#f3ead9}
+.fmtbar button.txt{font-size:12.5px;padding:5px 9px}
+.fmtbar .sep{width:1px;height:18px;background:rgba(255,255,255,.22);margin:0 2px}
+.fmtbar .lbl{color:#d8cbb6;font-size:11.5px;padding:0 2px;white-space:nowrap}
+
+/* ---------- 用电脑生成笔记 ---------- */
+.ag-files{border:1px solid var(--line);border-radius:10px;margin:8px 0;overflow:hidden;background:#fffdf8}
+.ag-files-head{display:flex;align-items:center;gap:8px;padding:7px 10px;border-bottom:1px solid var(--line);
+  font-size:12.5px;color:var(--sub)}
+.ag-path{padding:5px 10px;font-size:12px;color:var(--sub);background:#faf5ec;border-bottom:1px solid var(--line);
+  font-family:ui-monospace,Consolas,monospace;white-space:nowrap;overflow-x:auto}
+.ag-list{max-height:min(38vh,300px);overflow:auto;min-height:52px}
+.ag-row{display:flex;align-items:center;gap:7px;padding:6px 10px;cursor:pointer;font-size:13.5px;
+  border-bottom:1px solid rgba(216,206,190,.5)}
+.ag-row:last-child{border-bottom:0}
+.ag-row:hover{background:var(--accent-soft)}
+.ag-row.on{background:rgba(31,78,121,.10)}
+.ag-row.dir{color:var(--ink);font-weight:600}
+.ag-ic{flex:none;width:18px;text-align:center}
+.ag-nm{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ag-sz{flex:none;font-size:11.5px;color:var(--sub);font-variant-numeric:tabular-nums}
+.ag-ok{flex:none;color:#1f4e79;font-weight:700}
+.ag-chosen{display:flex;flex-wrap:wrap;gap:5px;padding:8px 10px;border-top:1px solid var(--line);min-height:38px}
+.ag-chip{display:inline-flex;align-items:center;gap:5px;background:#fff;border:1px solid var(--line);
+  border-radius:999px;padding:2px 8px 2px 10px;font-size:12.5px;color:var(--ink);max-width:100%}
+.ag-chip b{cursor:pointer;color:var(--sub);font-weight:400;padding:0 1px}
+.ag-chip b:hover{color:var(--accent)}
+.ag-empty{color:var(--sub);font-size:12.5px}
+.ag-preview{margin-top:10px;border-top:1px solid var(--line);padding-top:10px}
+.ag-note{border:1px solid var(--line);border-radius:10px;background:#fff;padding:10px 12px}
+.ag-note-head{display:flex;align-items:baseline;gap:10px;margin-bottom:6px}
+.ag-note-head strong{font-size:15px}
+.ag-note-body{max-height:min(42vh,340px);overflow:auto;font-size:14px;line-height:1.65}
+.ag-note-body h1,.ag-note-body h2,.ag-note-body h3{margin:10px 0 6px;line-height:1.35}
+.ag-note-body h1{font-size:18px}
+.ag-note-body h2{font-size:16px}
+.ag-note-body ul,.ag-note-body ol{padding-left:20px;margin:4px 0}
+.ag-outline{margin:6px 0 0;font:12.5px/1.7 ui-monospace,Consolas,monospace;color:var(--ink);
+  max-height:min(40vh,320px);overflow:auto;white-space:pre-wrap}
+
+/* 发件箱：电脑端（WorkBuddy 的 MCP 工具 / 桥）放进去的笔记，平板来收 */
+.ag-inbox{display:flex;align-items:center;gap:8px;padding:8px 10px;margin:0 0 8px;
+  border:1px solid rgba(31,78,121,.28);background:rgba(31,78,121,.06);border-radius:10px}
+
+/* hidden 属性会被 display:flex 覆盖，这几个浮层要显式关掉 */
+.ag-inbox[hidden],.candbar[hidden],.fmtbar[hidden],.itbar[hidden]{display:none!important}

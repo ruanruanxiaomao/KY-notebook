@@ -21,3 +21,8 @@ _local/
 # 安卓打包产物 / 中间文件
 dist-android/
 android/_work/
+
+# 电脑 Agent 桥的运行时文件（口令、收件箱队列，别入库）
+bridge/.bridge_token
+bridge/outbox.json
+bridge/__pycache__/

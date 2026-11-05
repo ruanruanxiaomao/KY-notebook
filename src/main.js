@@ -6,6 +6,7 @@ import { initMap } from './mapview.js';
 import { getCfg, setCfg, listModels } from './ai.js';
 import { getHwrCfg, setHwrCfg } from './hwr.js';
 import { getPrompts, setPrompts, resetPrompts, DEFAULT_PROMPTS } from './prompts.js';
+import { initAgent, getAgentCfg, setAgentCfg } from './agent.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -30,7 +31,8 @@ const notebook = initNotebook();
 const shot = initShot(notebook);
 const annot = initAnnot();
 const map = initMap();
-window.__kynb = { notebook, shot, annot, map };   /* 调试 / 冒烟测试用 */
+const agent = initAgent(notebook, map);      /* 连电脑：用电脑上的语料生成笔记 */
+window.__kynb = { notebook, shot, annot, map, agent };   /* 调试 / 冒烟测试用 */
 
 /* ---------- 笔记文字字体 ---------- */
 const FONT_KEY = 'kynb_font';              /* 文字块字体（黑体/宋体/楷体…，'' = 默认） */
@@ -175,6 +177,32 @@ $('btnSettings').onclick = () => {
   $('cfgModel').value = c.model || '';
   $('cfgVision').checked = !!c.vision;
   $('cfgIdle').value = String(getHwrCfg().idle);
+  const commitMs = getHwrCfg().commit || 8000;
+  const commitOpts = [...$('cfgCommit').options].map((o) => Number(o.value));
+  const commitNear = commitOpts.reduce((a, b) => (Math.abs(b - commitMs) < Math.abs(a - commitMs) ? b : a), commitOpts[0]);
+  $('cfgCommit').value = String(commitNear);
+  /* 排版：字号 / 行距 / 对齐 */
+  const lo = notebook.getLayout ? notebook.getLayout() : { size: 0, gap: 1.35, align: 'left' };
+  const sizeVal = String(lo.size);
+  const hasOpt = [...$('cfgHwrSize').options].some((o) => o.value === sizeVal);
+  $('cfgHwrSize').value = hasOpt ? sizeVal : '-1';
+  $('cfgHwrSizeCustom').hidden = hasOpt;
+  $('cfgHwrSizeCustom').value = hasOpt ? '' : String(lo.size || '');
+  $('cfgHwrGap').value = String(lo.gap);
+  /* 排版面板的「行距±」会做出 1.45 这种值，下拉里没有就归到最近的一档，别让框空着 */
+  if (!$('cfgHwrGap').value) {
+    const gaps = [...$('cfgHwrGap').options].map((o) => Number(o.value));
+    const near = gaps.reduce((a, b) => (Math.abs(b - lo.gap) < Math.abs(a - lo.gap) ? b : a), gaps[0]);
+    $('cfgHwrGap').value = String(near);
+  }
+  $('cfgHwrAlign').value = lo.align || 'left';
+  /* 电脑 Agent */
+  const ag = getAgentCfg();
+  $('cfgAgUrl').value = ag.url || '';
+  $('cfgAgToken').value = ag.token || '';
+  $('cfgAgStatus').textContent = '';
+  $('cfgAgStatus').className = 'status';
+  $('cfgHwrApplyStatus').textContent = '';
   $('cfgFont').value = fontSaved;
   applyFont();
   fillSysFonts(false);
@@ -192,12 +220,17 @@ $('cfgSave').onclick = () => {
     vision: $('cfgVision').checked,
   });
   const hc = getHwrCfg();
-  hc.idle = Number($('cfgIdle').value) || 600;
+  hc.idle = Number($('cfgIdle').value) || 800;
+  hc.commit = Number($('cfgCommit').value) || 8000;
   setHwrCfg(hc);
   if (notebook.hwr) notebook.hwr.idle = hc.idle;
   const hud = !!$('cfgHud').checked;
   try { localStorage.setItem('kynb_hud', hud ? '1' : '0'); } catch (e) { /* 忽略 */ }
   notebook.setHud(hud);
+  /* 排版：字号（-1 = 自定义，读右边那个数字框）/ 行距 / 对齐 */
+  if (notebook.setLayout) notebook.setLayout(readLayoutForm());
+  /* 电脑 Agent 地址 / 口令 */
+  setAgentCfg({ url: $('cfgAgUrl').value, token: $('cfgAgToken').value });
   /* 字体：选中项即保存（''=系统默认） */
   fontSaved = $('cfgFont').value || '';
   try { localStorage.setItem(FONT_KEY, fontSaved); } catch (e) { /* 忽略 */ }
@@ -207,6 +240,31 @@ $('cfgSave').onclick = () => {
 /* 设置里换字体立刻能看见效果；点「取消」则回到已保存的那个 */
 $('cfgFont').onchange = () => { applyFont(); };
 dlgSettings.addEventListener('close', () => { applyFont(); });
+
+/* ---------- 排版设置 ---------- */
+function readLayoutForm() {
+  const selSize = Number($('cfgHwrSize').value);
+  const customSize = Number($('cfgHwrSizeCustom').value);
+  const wantSize = selSize === -1 ? customSize : selSize;
+  return {
+    size: Math.max(0, Math.min(160, Math.round(wantSize) || 0)),
+    gap: Number($('cfgHwrGap').value) || 1.35,
+    align: $('cfgHwrAlign').value,
+  };
+}
+$('cfgHwrSize').onchange = () => {
+  const custom = $('cfgHwrSize').value === '-1';
+  $('cfgHwrSizeCustom').hidden = !custom;
+  if (custom) $('cfgHwrSizeCustom').focus();
+};
+$('cfgHwrApply').onclick = () => {
+  /* 先把表单里的值存进设置（用户可能还没点保存），再套到本页 */
+  if (notebook.setLayout) notebook.setLayout(readLayoutForm());
+  const st = $('cfgHwrApplyStatus');
+  const n = notebook.applyLayoutToPage ? notebook.applyLayoutToPage() : 0;
+  st.className = 'status';
+  st.textContent = n ? `已把这一页 ${n} 块文字改成这个字号 / 行距` : '这一页还没有文字';
+};
 
 /* ---------- 手机里的字体（含主题换的字体） ---------- */
 $('cfgSysFontReload').onclick = () => fillSysFonts(true);

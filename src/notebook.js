@@ -5,7 +5,7 @@ import { buildNoteJson, parseNoteJson } from './notejson.js';
 import { mdInto } from './md.js';
 import { HwrPad } from './hwrpad.js';
 import { bboxOf, groupLines, looksLikeFormula, recognizeLocal, recognizeAI, recognizeFormula, texToImage,
-  inkToCanvas, recognizeStrokes, estimateSize } from './hwr.js';
+  inkToCanvas, recognizeStrokes, estimateSize, isPunctLike, getHwrCfg, charClusters } from './hwr.js';
 import { chat, getCfg } from './ai.js';
 
 const LS_LAST = 'kynb_last_note';
@@ -192,6 +192,30 @@ export function initNotebook() {
   let lastSize = 40;           /* 上一段用过的字号：写「一」「丶」这种估不出高度时兜底 */
   let inlineEditor = null;     /* 打字工具：纸面上的就地输入框 */
 
+  /* ---------- 排版设置（字号 / 行距 / 对齐）----------
+     识别出来的字默认「一行一块、行距统一、左边界对齐」；这里的三项就是那套默认值的开关。 */
+  const LAYOUT_KEY = 'kynb_layout';
+  const layout = { size: 0, gap: 1.35, align: 'left' };   /* size=0 表示跟随笔迹高度 */
+  try {
+    const raw = JSON.parse(localStorage.getItem(LAYOUT_KEY) || '{}');
+    if (raw && typeof raw === 'object') {
+      layout.size = Math.max(0, Math.min(160, Number(raw.size) || 0));
+      layout.gap = Math.max(1.1, Math.min(3, Number(raw.gap) || 1.35));
+      if (raw.align === 'center' || raw.align === 'right') layout.align = raw.align;
+    }
+  } catch (e) { /* 无痕模式 */ }
+
+  function getLayout() { return { size: layout.size, gap: layout.gap, align: layout.align }; }
+
+  function setLayout(next) {
+    if (!next) return getLayout();
+    if (next.size != null) layout.size = Math.max(0, Math.min(160, Number(next.size) || 0));
+    if (next.gap != null) layout.gap = Math.max(1.1, Math.min(3, Number(next.gap) || 1.35));
+    if (next.align) layout.align = (next.align === 'center' || next.align === 'right') ? next.align : 'left';
+    try { localStorage.setItem(LAYOUT_KEY, JSON.stringify(layout)); } catch (e) { /* 忽略 */ }
+    return getLayout();
+  }
+
   const pageNow = () => st.pages[st.idx];
 
   /* ---------- 字体：笔记里的文字跟着「系统字体」走，可以在设置里换 ---------- */
@@ -244,6 +268,43 @@ export function initNotebook() {
     const maxW = Math.max(80, Math.round(board.pageW - it.x - 8));
     it.w = Math.max(48, Math.min(maxW, need));
     return it.w;
+  }
+
+  function itemSize(it) { return Math.max(8, Math.round(Number(it && it.size) || 32)); }
+
+  /** 行距倍率：老数据没有 lh，按 1.3（和 .tx 原来的行高一致） */
+  function itemLh(it) {
+    const v = Number(it && it.lh);
+    return Math.max(1.05, Math.min(3, isFinite(v) && v > 0 ? v : 1.3));
+  }
+
+  /** 文字按当前字号 / 折行宽度排出来有几行、最宽多宽、总共多高（页面坐标） */
+  function textMetricsOf(it) {
+    const size = itemSize(it);
+    const maxW = Math.max(20, Number(it.w) || 300);
+    if (!_measureCtx) _measureCtx = document.createElement('canvas').getContext('2d');
+    _measureCtx.font = `${size}px ${textFont()}`;
+    let rows = 0, widest = 0;
+    for (const par of String(it.text || '').split('\n')) {
+      if (!par) { rows += 1; continue; }
+      let cur = '', w = 0;
+      for (const ch of par) {
+        const cw = _measureCtx.measureText(ch).width;
+        if (cur && w + cw > maxW) { widest = Math.max(widest, w); rows += 1; cur = ch; w = cw; }
+        else { cur += ch; w += cw; }
+      }
+      widest = Math.max(widest, w);
+      rows += 1;
+    }
+    const n = Math.max(1, rows);
+    return { rows: n, w: Math.max(8, widest), h: n * size * itemLh(it) };
+  }
+
+  /** 元素在页面坐标系里的实际框（文字按真实排版量算，图片用 w/h）——对齐、等距都按它算 */
+  function visualBox(it) {
+    if (it.type === 'image') return { x: it.x, y: it.y, w: it.w || 100, h: it.h || it.w || 100 };
+    const m = textMetricsOf(it);
+    return { x: it.x, y: it.y, w: m.w, h: m.h };
   }
 
   function setTool(t) {
@@ -302,6 +363,7 @@ export function initNotebook() {
         const tx = document.createElement('div');
         tx.className = 'tx';
         tx.style.fontSize = (it.size || 32) + 'px';
+        tx.style.lineHeight = String(itemLh(it));   /* 行距跟着这块走，屏幕和导出用同一个值 */
         tx.style.color = it.color || '#1f1c18';
         tx.textContent = it.text || '';
         el.appendChild(tx);
@@ -419,6 +481,7 @@ export function initNotebook() {
     }
     /* 只有文字能改字号；纯图片选中时把 A− / A+ 收起来 */
     itBar.classList.toggle('pic', texts.length === 0);
+    if (fmtOpen) placeFmt();
   }
 
   function openBar(it) {
@@ -432,6 +495,7 @@ export function initNotebook() {
   function closeBar() {
     barItem = null;
     itBar.hidden = true;
+    try { closeFmt(); } catch (e) { /* 初始化早期还没定义 */ }
   }
 
   /** 改字号：选中的文字块一起改（批量） */
@@ -447,12 +511,209 @@ export function initNotebook() {
     refreshBar();
   }
 
+  /* ---------- 排版：对齐 / 等距 / 统一字号 / 行距 / 整理本页 ---------- */
+  const fmtBar = $('fmtBar');
+  let fmtOpen = false;
+
+  function placeFmt() {
+    /* 面板固定在屏幕下方中间（样式里定的），这里只清掉可能残留的 inline 定位，免得和 transform 打架 */
+    if (!fmtBar) return;
+    fmtBar.style.removeProperty('left');
+    fmtBar.style.removeProperty('top');
+  }
+
+  function openFmt() {
+    if (!fmtBar || !sel.size) return;
+    fmtBar.hidden = false;
+    fmtOpen = true;
+    placeFmt();
+  }
+
+  function closeFmt() {
+    fmtOpen = false;
+    if (fmtBar) fmtBar.hidden = true;
+  }
+
+  const ALIGN_NAME = {
+    left: '左对齐', right: '右对齐', hcenter: '水平居中',
+    top: '顶端对齐', bottom: '底端对齐', vcenter: '垂直居中',
+  };
+
+  /** 对齐：按选中内容的真实包围盒（文字按排版量算，不是框宽） */
+  function alignSel(op) {
+    const list = selItems();
+    if (!list.length) return;
+    const bs = list.map((it) => ({ it, b: visualBox(it) }));
+    const L = Math.min(...bs.map((x) => x.b.x));
+    const R = Math.max(...bs.map((x) => x.b.x + x.b.w));
+    const T = Math.min(...bs.map((x) => x.b.y));
+    const B = Math.max(...bs.map((x) => x.b.y + x.b.h));
+    for (const { it, b } of bs) {
+      if (op === 'left') it.x = Math.round(L);
+      else if (op === 'right') it.x = Math.round(R - b.w);
+      else if (op === 'hcenter') it.x = Math.round((L + R) / 2 - b.w / 2);
+      else if (op === 'top') it.y = Math.round(T);
+      else if (op === 'bottom') it.y = Math.round(B - b.h);
+      else if (op === 'vcenter') it.y = Math.round((T + B) / 2 - b.h / 2);
+      it.x = Math.max(2, it.x);
+      it.y = Math.max(2, it.y);
+    }
+    renderItems();
+    saveSoon(true);
+    refreshBar();
+    toast('已' + (ALIGN_NAME[op] || '对齐'));
+  }
+
+  /** 等距分布：至少 3 块，按中心排序后让间隙相等 */
+  function distributeSel(axis) {
+    const list = selItems();
+    if (list.length < 3) { toast('至少选 3 块才能等距分布', true); return; }
+    const bs = list.map((it) => ({ it, b: visualBox(it) }));
+    if (axis === 'h') {
+      bs.sort((a, b) => a.b.x - b.b.x);
+      const first = bs[0].b.x;
+      const last = bs[bs.length - 1];
+      const total = bs.reduce((s, x) => s + x.b.w, 0);
+      const gap = ((last.b.x + last.b.w) - first - total) / (bs.length - 1);
+      let cur = first;
+      for (const x of bs) { x.it.x = Math.round(cur); cur += x.b.w + gap; }
+    } else {
+      bs.sort((a, b) => a.b.y - b.b.y);
+      const first = bs[0].b.y;
+      const last = bs[bs.length - 1];
+      const total = bs.reduce((s, x) => s + x.b.h, 0);
+      const gap = ((last.b.y + last.b.h) - first - total) / (bs.length - 1);
+      let cur = first;
+      for (const x of bs) { x.it.y = Math.round(cur); cur += x.b.h + gap; }
+    }
+    renderItems();
+    saveSoon(true);
+    refreshBar();
+    toast(axis === 'h' ? '已水平等距' : '已垂直等距');
+  }
+
+  /** 统一字号 + 行距：以第一块为准 */
+  function sameSizeSel() {
+    const texts = selItems().filter((x) => x.type === 'text');
+    if (!texts.length) { toast('选中的里面没有文字', true); return; }
+    const size = itemSize(texts[0]);
+    const lh = itemLh(texts[0]);
+    for (const it of texts) { it.size = size; it.lh = lh; fitItemWidth(it); }
+    renderItems();
+    saveSoon(true);
+    refreshBar();
+    toast(`已统一成 ${size}px`);
+  }
+
+  function bumpGapSel(d) {
+    const texts = selItems().filter((x) => x.type === 'text');
+    if (!texts.length) return;
+    for (const it of texts) {
+      it.lh = Math.max(1.05, Math.min(3, Math.round((itemLh(it) + d) * 20) / 20));
+    }
+    renderItems();
+    saveSoon(true);
+    refreshBar();
+    toast('行距 ' + itemLh(texts[0]).toFixed(2));
+  }
+
+  /**
+   * 整理本页：把这一页的文字按「行」归拢 —— 行内左边界对齐、行距统一、超出页宽自动折到下一行。
+   * 手写时东一句西一句也能一键排成整齐的段落；一条 ↶ 可撤回。
+   */
+  function tidyPage() {
+    const p = pageNow();
+    if (!p || !Array.isArray(p.items)) return 0;
+    const texts = p.items.filter((x) => x.type === 'text' && String(x.text || '').trim());
+    if (!texts.length) { toast('这一页没有文字', true); return 0; }
+    board.pushUndo();
+    const margin = 96;
+    const maxW = Math.max(240, Math.round(board.pageW - margin * 2));
+    /* 1) 按视觉中心 y 归行 */
+    const rows = [];
+    for (const it of texts.slice().sort((a, b) => visualBox(a).y - visualBox(b).y)) {
+      const b = visualBox(it);
+      const cy = b.y + b.h / 2;
+      let row = null;
+      for (const r of rows) {
+        if (Math.abs(cy - r.cy) < Math.min(b.h, r.h) * 0.55) { row = r; break; }
+      }
+      if (!row) { row = { cy, h: b.h, list: [] }; rows.push(row); }
+      row.list.push(it);
+      row.cy = (row.cy * (row.list.length - 1) + cy) / row.list.length;
+      row.h = Math.max(row.h, b.h);
+    }
+    rows.sort((a, b) => a.cy - b.cy);
+    /* 2) 逐行排：左边界对齐、行距统一、放不下就折到下一行 */
+    let y = Math.max(40, Math.round(rows[0].cy - rows[0].h / 2));
+    for (const r of rows) {
+      r.list.sort((a, b) => a.x - b.x);
+      let x = margin;
+      let rowH = 0;
+      for (const it of r.list) {
+        const size = itemSize(it);
+        it.lh = layout.gap;
+        fitItemWidth(it);
+        if (it.w > maxW) it.w = maxW;
+        const vw = visualBox(it).w;
+        if (x > margin && x + vw > margin + maxW) {   /* 这一行放不下 → 换行 */
+          y += rowH + Math.round(size * 0.35);
+          x = margin;
+          rowH = 0;
+        }
+        it.x = Math.round(x);
+        it.y = Math.round(y);
+        x += vw + Math.round(size * 0.35);
+        rowH = Math.max(rowH, visualBox(it).h);
+      }
+      y += Math.max(rowH, r.h);
+    }
+    renderItems();
+    saveSoon(true);
+    toast('已把这一页的文字按行排整齐');
+    return texts.length;
+  }
+
+  /** 把设置里的字号 / 行距用到本页所有文字（老笔记也能一次改齐） */
+  function applyLayoutToPage() {
+    const p = pageNow();
+    if (!p || !Array.isArray(p.items)) return 0;
+    let n = 0;
+    for (const it of p.items) {
+      if (it.type !== 'text') continue;
+      if (layout.size) it.size = layout.size;
+      it.lh = layout.gap;
+      fitItemWidth(it);
+      n += 1;
+    }
+    renderItems();
+    saveSoon(true);
+    return n;
+  }
+
+  if (fmtBar) {
+    fmtBar.addEventListener('click', (e) => {
+      const b = e.target.closest('button');
+      if (!b) return;
+      if (b.dataset.align) { alignSel(b.dataset.align); return; }
+      if (b.dataset.dist) { distributeSel(b.dataset.dist); return; }
+      const f = b.dataset.fmt;
+      if (f === 'close') { closeFmt(); return; }
+      if (f === 'same') { sameSizeSel(); return; }
+      if (f === 'gapup') { bumpGapSel(0.1); return; }
+      if (f === 'gapdown') { bumpGapSel(-0.1); return; }
+      if (f === 'tidy') { tidyPage(); return; }
+    });
+    window.addEventListener('resize', () => placeFmt());
+  }
+
   if (itBar) {
     itBar.addEventListener('click', (e) => {
       const b = e.target.closest('[data-act]');
       if (!b) return;
       const act = b.dataset.act;
       if (act === 'del') { removeSelected(); return; }
+      if (act === 'fmt') { if (fmtOpen) closeFmt(); else openFmt(); return; }
       if (act === 'whole') {
         const list = selItems();
         if (list.length === 1 && list[0].type === 'text') {
@@ -644,15 +905,17 @@ export function initNotebook() {
 
   /** 点一下某个元素：文字按「字」选，图片整块选；返回现在是否处于选中态 */
   function tapSelect(it, cx, cy) {
+    /* 已经选着别的块时，点新的一块是「加进来」而不是把之前的清掉——这样点几下就能攒出多选 */
+    const add = sel.size > 0 && !sel.has(it.id);
     if (it.type === 'text') {
       const [px, py] = pageAt(cx, cy);
       const idx = charIndexAt(it, px, py);
-      const on = toggleChar(it, idx);
+      const on = toggleChar(it, idx, add);
       if (on) openBar(it); else closeBar();
       return on;
     }
     if (sel.get(it.id) === null) { sel.delete(it.id); paintSel(); closeBar(); return false; }
-    sel.clear();
+    if (!add) sel.clear();
     sel.set(it.id, null);
     paintSel();
     openBar(it);
@@ -665,11 +928,17 @@ export function initNotebook() {
    *  · 点在选中范围的左右隔壁 → 把范围扩一个字（连着点就能选一段）
    *  · 其它情况 → 重新只选这一个字
    */
-  function toggleChar(it, idx) {
+  function toggleChar(it, idx, add) {
     const cur = sel.get(it.id);
     if (cur && idx >= cur.a && idx < cur.b) { sel.delete(it.id); paintSel(); return false; }
     if (cur && (idx === cur.b || idx === cur.a - 1)) {
       sel.set(it.id, { a: Math.min(cur.a, idx), b: Math.max(cur.b, idx + 1) });
+      paintSel();
+      return true;
+    }
+    if (add && !cur) {
+      /* 点到另一块上：追加进来，不清掉前面选的 */
+      sel.set(it.id, { a: idx, b: idx + 1 });
       paintSel();
       return true;
     }
@@ -902,6 +1171,7 @@ export function initNotebook() {
   let texTimer = 0;
   let busyConv = false;
   let hinted = false;                  // 「手指点一下能删」的提示只弹一次
+  let resumeHinted = false;            // 「这几笔没认出来」的提示只弹一次
 
   try { hwrMode = localStorage.getItem(HWR_MODE_KEY) || 'off'; } catch (e) { hwrMode = 'off'; }
   if (hwrMode !== 'text' && hwrMode !== 'formula') hwrMode = 'off';
@@ -916,7 +1186,7 @@ export function initNotebook() {
     hwrMode = hwrMode === m ? 'off' : m;
     try { localStorage.setItem(HWR_MODE_KEY, hwrMode); } catch (e) { /* 无痕 */ }
     paintHwrBtns();
-    try { commitLine(); } catch (e) { /* 还没定义 */ }
+    try { commitLine(true); } catch (e) { /* 还没定义 */ }
     pendingTex.clear();
     clearTimeout(texTimer);
     if (hwrMode === 'text') toast('边写边认已开：写完一个字就变成文字，停一下把整行定稿');
@@ -952,25 +1222,48 @@ export function initNotebook() {
     renderItems();
   };
 
-  /** 一行笔迹 → 原位文字块（字号按笔迹高度，颜色跟着笔走；宽度按文字实际排版量出来） */
+  /** 一行笔迹 → 原位文字块（字号按设置/笔迹高度，颜色跟着笔走；宽度按文字实际排版量出来） */
   function insertTextFromInk(list, text, opt) {
     const bb = bboxOf(list);
     if (!bb) return null;
     const p = pageNow();
     if (!p) return null;
     if (!Array.isArray(p.items)) p.items = [];
-    const guess = (opt && opt.size) || estimateSize(list) || Math.round(bb.h * 1.1) || lastSize;
-    const size = Math.round(Math.max(12, Math.min(160, guess)));
+    const o = opt || {};
+    /* 字号优先级：设置里固定的大小 > 本次会话估出来的 > 笔迹高度 > 上一段的字号 */
+    const guess = layout.size || o.size || estimateSize(list) || Math.round(bb.h * 1.1) || lastSize;
+    const size = Math.round(Math.max(10, Math.min(160, guess)));
+    const lh = layout.gap;
     lastSize = size;
+    let x = Math.round(bb.x - size * 0.02);
+    let y = Math.round(bb.y - size * 0.15);
     const it = {
       id: uid('it'), type: 'text', z: 'above', text,
-      size, color: (list[0] && list[0].c) || '#1f1c18',
-      /* .tx 的行高是 1.3，字面顶部离行盒顶约 0.15 个字号，这里补回来，让文字正好压在墨迹上 */
-      x: Math.round(bb.x - size * 0.02),
-      y: Math.round(bb.y - size * 0.15),
-      w: 100, h: Math.round(size * 1.4),
+      size, lh, color: (list[0] && list[0].c) || '#1f1c18',
+      /* .tx 的行高是 lh，字面顶部离行盒顶约 0.15 个字号，这里补回来，让文字正好压在墨迹上 */
+      x, y, w: 100, h: Math.round(size * lh),
     };
     fitItemWidth(it);
+
+    /* 和上一块排成一段：左边界对齐（按设置的对齐方式）、行距统一。
+       这就是「默认成行、整整齐齐」的关键——不按手写位置硬贴，而是排到上一块的下一行。 */
+    const a = o.anchor;
+    if (a && a.type === 'text' && p.items.indexOf(a) >= 0) {
+      const aSize = itemSize(a);
+      const aLh = itemLh(a);
+      /* 用上一块「文字实际宽度」当基准：块的 x 就是文字起点，右边那点 padding 不该算进居中 */
+      const aW = textMetricsOf(a).w;
+      const myW = textMetricsOf(it).w;
+      if (layout.align === 'center') x = Math.round(a.x + (aW - myW) / 2);
+      else if (layout.align === 'right') x = Math.round(a.x + Math.max(0, aW - myW));
+      else x = Math.round(a.x);
+      /* 离得近才贴到下一行；离得远说明是另起一段，保留手写位置 */
+      const step = Math.round(aSize * aLh);
+      if (bb.y - (a.y + step) < aSize * 1.8) y = Math.round(a.y + step);
+      it.x = Math.max(4, x);
+      it.y = Math.max(4, y);
+      it.para = a.para || a.id;   /* 同一段：方便「整理本页」按段排 */
+    }
     p.items.push(it);
     return it;
   }
@@ -1041,14 +1334,28 @@ export function initNotebook() {
   }
 
   /* ---------- 边写边认（✍）：一行写到底，墨迹一个一个字变成文字 ---------- */
-  /* 做法：抬笔 300ms 就把「这一行到目前为止的墨迹」整行认一次，认出来的字原位铺成文字块，
+  /* 三个时间参数（都能在设置里调）：
+       idle   —— 抬笔后多久「开始识别」。Windows Ink 官方文档用的也是 1 秒：
+                 太短的话，一个字写到一半停一下就会被当成写完，认成半个字。
+       commit —— 抬笔后多久「这一行写完」，墨迹删掉只留文字。默认 8 秒。
+       need   —— 识别引擎是单线程的。正在认的时候又来了新笔画，不能把这次请求丢掉，
+                 要记一笔 need，这一轮结束立刻补认 —— 丢一次就等于那几笔没进文字，
+                 定稿时被一起删掉，表现就是「写了的字被吞了」。
+     做法：抬笔 idle 后把「这一行到目前为止的墨迹」整行认一次，认出来的字原位铺成文字块，
      同时把这一行墨迹临时藏起来（数据还在，只是不画）。接着写的字照常落在后面，
      下一次再整行认一遍、整体刷新 —— 所以越写越准，而不是一个字一个结果。
-     停笔 2.4s、换行、或关掉模式 → 定稿：把这一行墨迹真删掉，只留文字。 */
+     停笔 commit、换行、或关掉模式 → 定稿：把「已经变成文字」的墨迹删掉，只留文字。 */
+  function hwrIdleMs() {
+    try { return Math.max(200, Math.min(2000, getHwrCfg().idle || 800)); } catch (e) { return 800; }
+  }
+  function hwrCommitMs() {
+    try { return Math.max(3000, Math.min(20000, getHwrCfg().commit || 8000)); } catch (e) { return 8000; }
+  }
+
   function startSession(stroke) {
     const p = pageNow();
     const bb = bboxOf([stroke]);
-    const base = { strokes: [], item: null, base: '', size: 0, gen: 0, pt: 0, ct: 0 };
+    const base = { strokes: [], item: null, base: '', size: 0, gen: 0, pt: 0, ct: 0, need: false, tries: 0 };
     if (!p || !bb) return base;
     const prev = lastPara ? p.items.find((x) => x.id === lastPara.id && x.type === 'text') : null;
     if (!prev || Date.now() - lastPara.t > 45000) return base;
@@ -1056,14 +1363,22 @@ export function initNotebook() {
     const cy = bb.y + bb.h / 2;
     const endX = prev.x + measureW(prev.text, size);
     const gap = bb.x - endX;
+    /* ⓪ 标点（一小笔）一律并进上一块：单独一块模型认不出来，并进去才能整行重认 / 按形状兜底 */
+    if (isPunctLike([stroke], size)) {
+      return { ...base, item: prev, base: String(prev.text || ''), size };
+    }
     /* ① 同一行、接着上一块的尾巴写 → 续写（字号、位置都不动） */
     if (cy > prev.y + size * 0.15 && cy < prev.y + size * 1.55 && gap > -size * 2.2 && gap < size * 1.8) {
       return { ...base, item: prev, base: String(prev.text || ''), size };
     }
-    /* ② 同一行但离得远 / 紧接下一行 → 另起一块，但沿用字号，视觉上还是同一段 */
-    const prevBottom = prev.y + (prev.h || size * 1.4);
-    const below = bb.y >= prev.y && bb.y - prevBottom < size * 2.4;
-    if (below || (cy > prev.y - size * 0.9 && cy < prev.y + size * 2.2)) {
+    /* ② 下一行 → 另起一块，但锚到上一块：左边界对齐、行距统一（默认就排整齐） */
+    const aSize = itemSize(prev);
+    const step = Math.round(aSize * itemLh(prev));
+    if (bb.y > prev.y + aSize * 0.8 && bb.y - (prev.y + step) < aSize * 3.2) {
+      return { ...base, size, anchor: prev };
+    }
+    /* ③ 同一行但离得远（比如右边另起一个标题）→ 沿用字号，位置保留 */
+    if (cy > prev.y - aSize * 0.9 && cy < prev.y + aSize * 1.6) {
       return { ...base, size };
     }
     return base;
@@ -1074,34 +1389,108 @@ export function initNotebook() {
     const b = bboxOf([stroke]);
     const all = bboxOf(live.strokes);
     if (!b || !all) return false;
-    const lineH = Math.max(24, all.h);
-    return b.y > all.y + all.h + lineH * 0.55 && b.x < all.x + all.w * 0.8;
+    /* 行高别只看可见墨迹：墨迹已经被藏起来（变成文字）时只剩新写的一笔，
+       算出来的行高很小，同一行里的第二笔就会被判成「下一行」——
+       这是「一个字被拆成好几块」的第二个根因。
+       字号同理：只写一横时 estimateSize 会给个 12px 的小字号，
+       拿它去算行距，同一个字的下半部分就被甩到下一块去了。
+       所以这里取「整行墨迹高度」当字号下限。 */
+    const size = Math.max(live.size || 0, all.h * 0.95, live.item ? itemSize(live.item) : 0);
+    const lineH = Math.max(24, size * 0.9, all.h);
+    /* 标点这种一小笔永远不换行：拆成单独一块后模型认不出来（实测返回空） */
+    if (isPunctLike([stroke], lineH)) return false;
+    /* 这一行文字的上下边界：有文字块就按文字块算，没有就按墨迹算 */
+    const topY = live.item ? live.item.y : all.y;
+    const botY = live.item ? live.item.y + itemSize(live.item) : all.y + all.h;
+    const step = size * (live.item ? itemLh(live.item) : 1.35);
+    /* 行距 1.3~1.4 时，下一行起笔只比本行文字底部低一点点（约 0.15 行高），
+       门槛太严就永远换不了行，字全挤进同一块 */
+    if (b.y <= botY + lineH * 0.15) return false;
+    /* 和「最后一个字」横向有交集，而且没低出一整行 → 是这个字的下半部分
+       （「王」的末横、「你」的「尔」、上下结构），不能当换行 */
+    const cs = charClusters(live.strokes);
+    const lastC = cs.length ? cs[cs.length - 1] : null;
+    const onLastChar = !!lastC && b.x < lastC.x1 + lineH * 0.25 && b.x + b.w > lastC.x0 - lineH * 0.25;
+    if (onLastChar && b.y < topY + size * 1.25) return false;
+    /* 回行首 → 新的一行；没回行首但低了很多（右侧另起一段）也算 */
+    return b.x < all.x + size * 1.2 || b.y > botY + step * 0.9;
   }
 
-  async function previewLine() {
+  /** 已藏起来 = 已经变成文字，只有这些能删 */
+  function hiddenOf(L) { return L.strokes.filter((s) => board.hidden.has(s)); }
+  /** 还看得见 = 这一轮没认出来 / 还没轮到认，绝对不能跟着删 */
+  function visibleOf(L) { return L.strokes.filter((s) => !board.hidden.has(s)); }
+
+  /** 排一次识别：ms 后跑（默认用设置里的 idle），期间又来笔画就重新排 */
+  function schedulePreview(L, ms) {
+    if (!L) return;
+    clearTimeout(L.pt);
+    L.pt = setTimeout(() => { if (live === L) previewLine(L); }, Math.max(0, ms));
+  }
+
+  /** 排一次定稿：识别还没跑完就等一会儿再定稿，别拿旧的文字结果收尾 */
+  function scheduleCommit(L) {
+    if (!L) return;
+    clearTimeout(L.ct);
+    L.ct = setTimeout(() => {
+      if (live !== L) return;
+      if (busyConv || L.need) { scheduleCommit(L); return; }
+      commitLine();
+    }, hwrCommitMs());
+  }
+
+  async function previewLine(want) {
+    const L = want || live;
     if (window.__kynbDebug) window.__hwrDbg = { step: 'enter', live: !!live, busy: busyConv, note: !!st.note };
-    if (!live || busyConv || !st.note) return;
-    const L = live;
+    if (!L || !st.note) return;
+    /* 引擎正忙：记下「还有新的要认」，这一轮结束立刻补跑。
+       以前这里直接 return，那几笔就永远进不了文字（定稿时被一起删 = 笔画被吞） */
+    if (busyConv) { L.need = true; return; }
     const strokes = L.strokes.slice();
     const gen = L.gen;
     if (!strokes.length) return;
     busyConv = true;
     try {
-      /* 长行会被自动切段识别，不会再「后半截掉字」 */
-      const r = await recognizeStrokes(strokes);
+      /* 长行会被自动切段识别，不会再「后半截掉字」；
+         带上正常字号，识别器才知道「这一小笔是不是标点」 */
+      const refSize = L.size || (L.item ? itemSize(L.item) : 0) || lastSize || 0;
+      const r = await recognizeStrokes(strokes, { lineH: refSize });
       if (window.__kynbDebug) window.__hwrDbg = { step: 'recognized', text: r.text, score: r.score, stale: !(live === L && live.gen === gen) };
-      if (!live || live !== L || live.gen !== gen) return;   /* 期间又写了新的：这次结果过期 */
+      /* 期间又写了新的：这次结果过期，但别丢掉请求 —— 标记补跑，用最新的墨迹再认一遍 */
+      if (!live || live !== L || L.gen !== gen) { L.need = true; return; }
       /* 置信度只挡「完全不像字」的涂鸦；认错了还能点候选 / AI 再看，比不认强 */
       if (!r.text || r.score < 0.12) return;
-      if (!L.size) L.size = estimateSize(strokes) || lastSize;
+      /* 第一笔估出来的字号常常偏小（一横只有几像素高，estimateSize 会给 12px），
+         先按上一段的字号兜一下，写下去以后再按整行墨迹高度往上抬 */
+      if (!L.size) L.size = layout.size || Math.max(estimateSize(strokes) || 0, Math.round((lastSize || 40) * 0.8)) || lastSize;
+      else if (!layout.size && L.item) {
+        /* 整行墨迹比字号高一大截时，把这一块的字号抬到跟字高一致 ——
+           不然字挤在一起，换行判断也会算错 */
+        const allH = (bboxOf(L.strokes) || {}).h || 0;
+        if (allH > L.size * 1.25) {
+          const ns = Math.min(160, Math.round(allH * 0.95));
+          if (ns > L.size) { L.size = ns; L.item.size = ns; }
+        }
+      }
       L.cands = r.cands || null;
       L.inkUrl = r.dataUrl || '';
       if (!L.item) {
-        L.item = insertTextFromInk(strokes, r.text, { size: L.size });
+        L.item = insertTextFromInk(strokes, r.text, { size: L.size, anchor: L.anchor });
+        /* 插不进文字块（页面被切走 / 数据异常）就**别藏墨迹**：
+           藏了却没有任何文字接手，这一行就等于被吞掉了 */
+        if (!L.item) return;
       } else {
-        L.item.text = (L.base || '') + r.text;
-        if (L.size) L.item.size = L.size;
-        fitItemWidth(L.item);
+        /* 续写的那块可能已经被用户删了：别往已删除的块里写，重新起一块 */
+        const pg = pageNow();
+        if (pg && Array.isArray(pg.items) && pg.items.indexOf(L.item) < 0) {
+          L.item = null;
+          L.base = '';
+          L.item = insertTextFromInk(strokes, r.text, { size: L.size });
+          if (!L.item) return;
+        } else {
+          L.item.text = (L.base || '') + r.text;
+          fitItemWidth(L.item);     /* 续写不改字号：一段话只用一个字号 */
+        }
       }
       if (window.__kynbDebug) window.__hwrDbg = { step: 'inserted', id: L.item && L.item.id, items: (pageNow() || {}).items ? pageNow().items.length : -1 };
       board.hideStrokes(strokes, true);   /* 这一行的墨迹先藏起来，屏幕上只剩文字 */
@@ -1116,33 +1505,65 @@ export function initNotebook() {
       if (window.__kynbDebug) window.__hwrDbg = { step: 'error', msg: String(e && e.message || e), stack: String(e && e.stack || '').slice(0, 300) };
     } finally {
       busyConv = false;
+      /* 排队的那一次补上：不补就会「越写越少字」 */
+      if (live === L && L.need) { L.need = false; schedulePreview(L, 40); }
     }
   }
 
-  /** 这一行定稿：墨迹真删掉，文字留下（撤销只会退掉这一次转换） */
-  function commitLine() {
+  /** 这一行定稿：**只删已经变成文字的墨迹**，文字留下（撤销只会退掉这一次转换）
+      final=true：换页 / 关模式时用 —— 没进文字的笔画留在原处，不要在新页接着认 */
+  function commitLine(final) {
     const L = live;
     if (!L) return;
     clearTimeout(L.pt);
     clearTimeout(L.ct);
     live = null;
-    if (!L.item) return;
-    /* 快照：续写的情况下把这一段新加的字去掉；新起一块的情况下把整块去掉。
-       撤销后回到「墨迹还在、还没转」的状态。 */
-    const snap = board._snap();
-    if (L.base) {
-      snap.items = snap.items.map((x) => (x.id === L.item.id ? { ...x, text: L.base } : x));
-    } else {
-      snap.items = snap.items.filter((x) => x.id !== L.item.id);
+    /* 关键：以前这里是 removeStrokes(L.strokes)，把整行墨迹全删。
+       如果最后一次识别没跑完 / 没认出（那几笔还没被藏起来），
+       它们就会连墨迹带文字一起消失 —— 这就是「写了的笔画被系统吞掉」。
+       现在只删 hidden 的（= 已经在文字里的），没进文字的留在画布上继续认。 */
+    const done = hiddenOf(L);
+    const rest = visibleOf(L);
+    if (L.item) {
+      /* 快照：续写的情况下把这一段新加的字去掉；新起一块的情况下把整块去掉。
+         撤销后回到「墨迹还在、还没转」的状态。 */
+      const snap = board._snap();
+      if (L.base) {
+        snap.items = snap.items.map((x) => (x.id === L.item.id ? { ...x, text: L.base } : x));
+      } else {
+        snap.items = snap.items.filter((x) => x.id !== L.item.id);
+      }
+      board.undoStack.push(snap);
+      if (board.undoStack.length > 100) board.undoStack.shift();
+      board.redoStack.length = 0;
     }
-    board.undoStack.push(snap);
-    if (board.undoStack.length > 100) board.undoStack.shift();
-    board.redoStack.length = 0;
-    board.removeStrokes(L.strokes);
+    if (done.length) board.removeStrokes(done);
     renderItems();
     saveSoon(true);
-    lastPara = { id: L.item.id, t: Date.now(), size: L.item.size };
-    if (L.cands && L.cands.length > 1) showCandBar(L.item, L.cands, L.inkUrl);
+    if (L.item) lastPara = { id: L.item.id, t: Date.now(), size: L.item.size };
+    if (L.item && L.cands && L.cands.length > 1) showCandBar(L.item, L.cands, L.inkUrl);
+    /* 剩下的墨迹别变成「死墨迹」：开新一轮接着认（同一次识别失败最多重试 3 轮） */
+    if (rest.length && !final && hwrMode === 'text') resumeWith(rest, L);
+  }
+
+  /** 定稿后还有没进文字的笔画：接着往同一块里续认 */
+  function resumeWith(list, from) {
+    if (!list.length) return;
+    const tries = (from && from.tries) || 0;
+    if (tries >= 3) {
+      if (!resumeHinted) {
+        resumeHinted = true;
+        toast('这几笔没认出来，墨迹先留着；可以圈住它们点「转文字」，或者擦掉重写', true);
+      }
+      return;
+    }
+    const L = live || startSession(list[0]);
+    if (!L) return;
+    L.tries = tries + 1;
+    for (const s of list) if (L.strokes.indexOf(s) < 0) L.strokes.push(s);
+    L.gen++;
+    schedulePreview(L, 260);
+    scheduleCommit(L);
   }
 
   /** 公式模式：AI 慢，不适合每个字刷一遍，写完整段再一次性转 */
@@ -1166,6 +1587,12 @@ export function initNotebook() {
     }
   }
 
+  /* 落笔 = 还在写这个字：把「等一会儿开始识别」的定时器停掉，
+     等他抬笔后重新计时。否则识别会正好在笔画中途跑起来，认到半个字 */
+  board.onStrokeStart = () => {
+    if (live) clearTimeout(live.pt);
+  };
+
   board.onStrokeEnd = (stroke) => {
     hideCandBar();
     if (hwrMode === 'off' || !st.note || st.mode === 'md') return;
@@ -1184,11 +1611,15 @@ export function initNotebook() {
     const L = live;
     L.strokes.push(stroke);
     L.gen++;
-    const gen = L.gen;
+    L.tries = 0;                 /* 有新笔画 = 重新开始，重试次数归零 */
     clearTimeout(L.pt);
     clearTimeout(L.ct);
-    L.pt = setTimeout(() => { if (live === L && L.gen === gen) previewLine(); }, 300);
-    L.ct = setTimeout(() => { if (live === L && L.gen === gen) commitLine(); }, 2400);
+    /* 开始识别的时间可调（默认 800ms）：Windows Ink 官方也是「抬笔后 1 秒没有新笔才开始认」。
+       太短的话，一个字写到一半停一下就被当成写完，认成半个字，还容易把后面的笔画挤丢 */
+    schedulePreview(L, hwrIdleMs());
+    /* 定稿时间可调（默认 8 秒）：写一个字的笔画之间停 2~5 秒是常态，
+       定稿太快 = 一个字被拆成好几块，所以别用 2.4 秒那种短阈值 */
+    scheduleCommit(L);
   };
 
   /* ---------- ⬚ 圈选：框住一片笔迹，就地转换 ---------- */
@@ -1370,18 +1801,11 @@ export function initNotebook() {
   }
 
   function placeCandBar(it) {
-    if (!candBar || !it) return;
-    const el = itemEl(it.id);
-    if (!el) { hideCandBar(); return; }
-    const r = el.getBoundingClientRect();
-    const bw = candBar.offsetWidth || 260;
-    const bh = candBar.offsetHeight || 36;
-    let top = r.bottom + 8;
-    if (top + bh > window.innerHeight - 8) top = Math.max(8, r.top - bh - 8);
-    let left = r.left + r.width / 2 - bw / 2;
-    left = Math.max(8, Math.min(window.innerWidth - bw - 8, left));
-    candBar.style.left = Math.round(left) + 'px';
-    candBar.style.top = Math.round(top) + 'px';
+    /* 候选条固定在屏幕下方（样式里定的），不跟着文字走——跟着文字会挡住下一行的起笔 */
+    if (!candBar) return;
+    candBar.style.removeProperty('left');
+    candBar.style.removeProperty('top');
+    if (it && !itemEl(it.id)) hideCandBar();
   }
 
   async function aiFix(it, inkUrl) {
@@ -1445,7 +1869,7 @@ export function initNotebook() {
     candBar.hidden = false;
     placeCandBar(it);
     clearTimeout(candTimer);
-    candTimer = setTimeout(() => hideCandBar(), 15000);
+    candTimer = setTimeout(() => hideCandBar(), 8000);
   }
 
   window.addEventListener('resize', () => { if (candFor) placeCandBar(candFor); });
@@ -1647,10 +2071,9 @@ export function initNotebook() {
   /** quick=true：只写页面和元数据、跳过缩略图与重绘列表——切后台 / 转屏时用，越快落盘越好 */
   async function saveNow(quick) {
     if (!st.note) return;
-    /* 还在「边写边认」的中间态就先把这一行定稿，否则存下去会留下「隐藏的墨迹 + 文字」，重开就重影了 */
-    if (live) {
-      try { commitLine(); } catch (e) { /* 初始化早期 */ }
-    }
+    /* 这里**不要** commitLine：预览阶段每写一笔都会存一次，一 commit 就等于「每笔都定稿」，
+       一个字会被拆成好几块（「停一下再写下一笔就变成好几个字」的根因就在这里）。
+       隐藏的墨迹已经从 getStrokes() 里剔掉，重开不会出现「墨迹 + 文字」重影。 */
     if (st.mode === 'md') {
       st.note.title = titleEl.value.trim() || '未命名笔记';
       st.note.md = st.md || '';
@@ -1703,8 +2126,8 @@ export function initNotebook() {
     if (!Array.isArray(p.items)) p.items = [];
     sel.clear();
     activeTextId = null;      /* 换页了，手写文字重新找个框 */
+    try { commitLine(true); } catch (e) { /* 初始化早期还没定义 */ }
     lastPara = null;
-    try { commitLine(); } catch (e) { /* 初始化早期还没定义 */ }
     pendingTex.clear();
     clearTimeout(texTimer);
     try { clearLasso(); } catch (e) { /* 初始化早期还没定义 */ }
@@ -2272,7 +2695,8 @@ export function initNotebook() {
   }
 
   const api = { renderLib, newNote, openNote, board, hwr, state: st, addBgPage, addBgNote, addMdNote, toast,
-    renderItems, openHandPad, convertInk, setHwrMode, refreshFont, setHud: (on) => board.setHud(on) };
+    renderItems, openHandPad, convertInk, setHwrMode, refreshFont, setHud: (on) => board.setHud(on),
+    getLayout, setLayout, applyLayoutToPage, tidyPage, openFmt };
   noteApi = api;
   /* 上次开了延迟面板就继续开着（调试用，不影响写字） */
   try { if (localStorage.getItem('kynb_hud') === '1') board.setHud(true); } catch (e) { /* 无痕模式 */ }

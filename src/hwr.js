@@ -17,7 +17,10 @@ export function getHwrCfg() {
   return {
     auto: c.auto !== false,              // 自动上屏：认出来直接写进笔记
     engine: c.engine === 'ai' ? 'ai' : 'local',
-    idle: Math.max(200, Math.min(2000, Number(c.idle) || 500)),   // 停笔多久开始识别
+    idle: Math.max(200, Math.min(3000, Number(c.idle) || 800)),   // 停笔多久开始识别
+    /* 停笔多久算「这一行写完了」：写一个字常常要在笔画之间停 2~5 秒，
+       定稿太快会把一个字拆成好几块（以前 2.4 秒就是这么坏事的） */
+    commit: Math.max(3000, Math.min(20000, Number(c.commit) || 8000)),
   };
 }
 
@@ -25,7 +28,8 @@ export function setHwrCfg(c) {
   localStorage.setItem(LS_HWR, JSON.stringify({
     auto: c.auto !== false,
     engine: c.engine === 'ai' ? 'ai' : 'local',
-    idle: Math.max(200, Math.min(2000, Number(c.idle) || 600)),
+    idle: Math.max(200, Math.min(3000, Number(c.idle) || 800)),
+    commit: Math.max(3000, Math.min(20000, Number(c.commit) || 8000)),
   }));
 }
 
@@ -226,11 +230,113 @@ export function estimateSize(strokes) {
   return Math.max(12, Math.min(200, Math.round(h / 0.88)));
 }
 
+/* ---------------- 标点：一小笔的特殊照顾 ----------------
+   PP-OCR 是「整行」识别器：一行里带标点它认得（实测「你好，世界。这是测试！」100%），
+   但把单独一个逗号/句号裁出来送进去，它几乎一律返回空（实测 ，。、（）“ 全空）。
+   所以这里做两件事：
+     1) 判断「这一笔小到不可能是汉字」——换行/分块时别把标点拆出去；
+     2) 万一真被单独识别了，按形状猜一个标点补上。 */
+
+function inkLen(strokes) {
+  let n = 0;
+  for (const s of strokes) {
+    let prev = null;
+    eachPt(s.pts, (x, y) => {
+      if (prev) n += Math.hypot(x - prev[0], y - prev[1]);
+      prev = [x, y];
+    });
+  }
+  return n;
+}
+
+/** 像不像一个标点：笔画很少、bbox 很小（相对行高或绝对尺寸），且笔画总长很短 */
+export function isPunctLike(strokes, lineH) {
+  const b = bboxOf(strokes);
+  if (!b) return false;
+  if (!strokes || strokes.length > 2) return false;      /* 标点最多两笔（冒号、引号） */
+  const ref = Math.max(12, Number(lineH) || 0);
+  /* 绝对尺寸兜底：1414 宽的纸上，正常字不会小于 22px 高 */
+  const tiny = b.h < 22 && b.w < 26;
+  const small = ref > 0 && b.h < ref * 0.42 && b.w < ref * 0.62;
+  if (!tiny && !small) return false;
+  return inkLen(strokes) < Math.max(36, ref * 1.6);
+}
+
+/**
+ * 单独一个标点被认成空/乱码时，按形状猜：
+ * 很短的点→。 短斜点→、 带尾巴的撇→， 上下两点→：
+ * lineH 是正常字的高度（没传就按标点自身高度反推）。
+ */
+export function guessPunct(strokes, lineH) {
+  const b = bboxOf(strokes);
+  if (!b) return '';
+  const list = strokes.filter((s) => ptCount(s.pts) > 0);
+  if (!list.length) return '';
+  if (list.length === 2) {
+    const bs = list.map((s) => bboxOf([s])).filter(Boolean).sort((a, c) => a.y - c.y);
+    if (bs.length === 2 && bs[1].y > bs[0].y + bs[0].h * 0.9 &&
+        bs[0].h < b.h * 0.7 && bs[1].h < b.h * 0.7) return '：';
+  }
+  const ref = Math.max(14, Number(lineH) || b.h * 2.4);
+  const len = inkLen(list);
+  /* 首尾距离 / 总长度：点（或小圈）起点终点几乎重合，撇是一条线 */
+  let first = null, lastPt = null;
+  for (const s of list) {
+    eachPt(s.pts, (x, y) => { if (!first) first = [x, y]; lastPt = [x, y]; });
+  }
+  const chord = (first && lastPt) ? Math.hypot(lastPt[0] - first[0], lastPt[1] - first[1]) : 0;
+  const straight = len > 0 ? chord / len : 0;
+  if (len < ref * 0.16) return '。';        /* 很短 */
+  if (straight < 0.6) return '。';          /* 起点终点几乎重合：点 / 小圈 */
+  if (len < ref * 0.28) return '、';        /* 短撇 */
+  return '，';                              /* 带尾巴的长撇 */
+}
+
+/** 中文语境里把半角标点换成全角（纯英文不动；小数点的点不换） */
+export function normalizePunct(s) {
+  const t = String(s == null ? '' : s);
+  if (!t) return t;
+  const hasCjk = /[\u4e00-\u9fff]/.test(t);
+  const hasLatin = /[A-Za-z]/.test(t);
+  if (!hasCjk && hasLatin) return t;
+  return t
+    .replace(/,/g, '，')
+    .replace(/;/g, '；')
+    .replace(/:/g, '：')
+    .replace(/\?/g, '？')
+    .replace(/!/g, '！')
+    .replace(/\(/g, '（')
+    .replace(/\)/g, '）')
+    .replace(/\./g, (m, i, all) =>
+      (/\d/.test(all[i - 1] || '') && /\d/.test(all[i + 1] || '')) ? '.' : '。');
+}
+
+/* 模型对单标点有时会吐字母/乱码，只有它真的给了标点才信它 */
+const PUNCT_ONLY = /^[，。？！：；、,.?!:;'"“”‘’（）()《》〈〉…·]+$/;
+
 /**
  * 一整行（或一整段）笔迹 → 文字：自动切段、逐段识别、按间隙补空格。
+ * opt.lineH：正常字的高度（上一行的字号），用来判断「这一小笔是不是标点」。
  * score 取各段最小值（最不确定的那段说话），调用方据此决定要不要动墨迹。
  */
-export async function recognizeStrokes(strokes) {
+export async function recognizeStrokes(strokes, opt) {
+  const all0 = bboxOf(strokes) || { h: 24 };
+  const refH = Math.max(12, Number(opt && opt.lineH) || all0.h);
+
+  /* 行尾那一小笔（句号/逗号/顿号）先摘出来：
+     模型经常把它当噪音——要么吞掉，要么带偏前面的字（实测「才，」被认成「オ-」）。
+     摘掉之后正文照常识别，标点按形状补回去。问号/感叹号个头大，不摘，交给模型。 */
+  let tail = null;
+  const last = strokes[strokes.length - 1];
+  if (last && strokes.length > 1) {
+    const lb = bboxOf([last]);
+    if (lb && isPunctLike([last], refH) && inkLen([last]) < refH * 0.32 &&
+        lb.x > all0.x + all0.w * 0.6) {
+      tail = last;
+      strokes = strokes.slice(0, -1);
+    }
+  }
+
   const parts = splitLongLine(strokes);
   const all = bboxOf(strokes) || { h: 24 };
   const H = Math.max(8, all.h);
@@ -241,15 +347,37 @@ export async function recognizeStrokes(strokes) {
     let r;
     try { r = await recognizeLocal(ink); } catch (e) { continue; }
     ms += r.ms;
-    if (!r.text) continue;
+    let got = r.text;
+    let sc = r.score;
+    /* 标点：模型单独认一小笔经常吐乱码（实测 点→"-"、撇→"」"），只有它真给了标点才信；
+       否则按形状补一个（。，、：），实在猜不出就用模型原来的结果 */
+    if (isPunctLike(p.strokes, refH)) {
+      if (!PUNCT_ONLY.test(got)) {
+        const g = guessPunct(p.strokes, refH);
+        if (g) { got = g; sc = 0.4; }
+      }
+      if (!got) sc = 0;
+    }
+    if (!got) continue;
     if (!dataUrl) dataUrl = ink.dataUrl;
     if (text && prevX1 != null && p.x0 - prevX1 > H * 0.9) text += ' ';
-    text += r.text;
-    score = Math.min(score, r.score);
+    text += got;
+    score = Math.min(score, sc);
     prevX1 = p.x1;
     /* 只有一整段时才能给「整行」的候选；切过段就只留一个结果 */
     if (parts.length === 1 && r.cands && r.cands.length) cands = r.cands;
   }
+  /* 把摘出去的标点补回行尾（正文末尾已经是标点就不重复加） */
+  if (tail) {
+    const g = guessPunct([tail], refH);
+    if (g) {
+      const t = text.trim();
+      if (!t) { text = g; score = Math.min(score, 0.4); }
+      else if (!/[，。？！：；、]$/.test(t)) text = t + g;
+      else text = t;
+    }
+  }
+
   return { text: text.trim(), score, ms, parts: parts.length, dataUrl,
     cands: cands || [{ text: text.trim(), score }] };
 }
@@ -531,14 +659,14 @@ export async function recognizeLocal(ink) {
     prev = c;
   }
   const conf = confN ? Math.exp(logSum / confN) : 0;
-  const text = fixLatin(toSimp(s.trim()));
+  const text = normalizePunct(fixLatin(toSimp(s.trim())));
 
   /* beam 候选（贪心的结果一定在里面，失败就用它兜底） */
   let cands = [];
   try {
     cands = ctcBeam(frames, _chars);
   } catch (e) { cands = []; }
-  cands = cands.map((c) => ({ ...c, text: fixLatin(c.text) }));
+  cands = cands.map((c) => ({ ...c, text: normalizePunct(fixLatin(c.text)) }));
   if (!cands.length || cands[0].text !== text) {
     cands = [{ text, score: confN ? conf / confN : 0 }, ...cands.filter((x) => x.text !== text)];
   }
