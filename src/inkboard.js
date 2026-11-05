@@ -501,7 +501,13 @@ export class InkBoard {
 
     /* 高频采样：pointerrawupdate 比 pointermove 更早、更密（Chromium 支持）；
        不支持的环境退回 pointermove，行为不变 */
-    if ('onpointerrawupdate' in cv) {
+    /* pointerrawupdate 在桌面 Chromium 上坐标是对的，但在 Android WebView 里
+       clientY 会和 pointerdown/pointermove 差一个「WebView 顶部内边距」的距离
+       （实测 44 CSS px：raw 给 518、move 给 474），于是落笔点和抬笔点各被拉出
+       一段竖钩，画直线看起来像「一竖一横再一竖」。
+       在 Android 上宁可少一点采样率，也不要错的坐标：只用 pointermove。 */
+    var isAndroidWebView = /Android/i.test(navigator.userAgent);
+    if (!isAndroidWebView && 'onpointerrawupdate' in cv) {
       cv.addEventListener('pointerrawupdate', (e) => move(e, true));
     }
     cv.addEventListener('pointermove', (e) => move(e, false));
