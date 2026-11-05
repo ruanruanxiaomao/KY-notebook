@@ -168,17 +168,87 @@ export class InkBoard {
     }
   }
 
+  /** 每种笔的粗细曲线：min/max 是「压力 0 → 1」时的倍率，mul 是整体倍率，alpha 是不透明度 */
+  static get BRUSHES() {
+    return {
+      pen: { mul: 1.0, min: 0.42, max: 1.05, alpha: 1 },     /* 钢笔：压感明显 */
+      ball: { mul: 1.0, min: 1.0, max: 1.0, alpha: 1 },      /* 圆珠笔：粗细均匀 */
+      pencil: { mul: 0.92, min: 0.72, max: 1.0, alpha: 0.72 }, /* 铅笔：淡、略有颗粒 */
+      brush: { mul: 1.5, min: 0.3, max: 1.5, alpha: 1 },     /* 毛笔：起收锋 + 压感 */
+      calli: { mul: 1.35, min: 1.0, max: 1.0, alpha: 1 },    /* 书法：按走向变粗细（扁笔尖） */
+      hl: { mul: 3.2, min: 1.0, max: 1.0, alpha: 0.3 },      /* 荧光笔 */
+      er: { mul: 3.0, min: 1.0, max: 1.0, alpha: 1 },
+    };
+  }
+
+  /** 单段的粗细（页面坐标） */
+  _segWidth(t, base, p, i, n, x0, y0, x1, y1) {
+    const B = InkBoard.BRUSHES[t] || InkBoard.BRUSHES.pen;
+    let w = base * B.mul;
+    if (t === 'calli') {
+      /* 扁笔尖：笔画方向和笔尖夹角越接近 90°，线越粗 */
+      const ang = Math.atan2(y1 - y0, x1 - x0);
+      w *= 0.28 + 0.95 * Math.abs(Math.sin(ang - 0.785));
+    } else {
+      w *= B.min + (B.max - B.min) * Math.max(0, Math.min(1, p));
+      if (t === 'brush') {
+        /* 起笔收笔各 3 个点收细，像毛笔的锋 */
+        const taper = Math.min(1, i / 3, (n - i) / 3);
+        w *= 0.32 + 0.68 * Math.max(0, taper);
+      }
+    }
+    return Math.max(0.55, w);
+  }
+
   _paintStroke(st) {
     const ctx = this.ctx;
+    const t = st.t || 'pen';
+    const B = InkBoard.BRUSHES[t] || InkBoard.BRUSHES.pen;
+    const pts = st.pts;
+    const n = Math.floor(pts.length / 3);
+    if (!n) return;
     ctx.save();
-    if (st.t === 'er') ctx.globalCompositeOperation = 'destination-out';
-    ctx.globalAlpha = st.t === 'hl' ? 0.3 : 1;
-    ctx.strokeStyle = st.t === 'er' ? 'rgba(0,0,0,1)' : st.c;
-    ctx.lineWidth = st.w * (st.t === 'hl' ? 3 : 1) * (st.t === 'er' ? 3 : 1);
+    if (t === 'er') ctx.globalCompositeOperation = 'destination-out';
+    else if (t === 'hl') ctx.globalCompositeOperation = 'multiply';   /* 荧光笔：叠在字上不糊 */
+    ctx.globalAlpha = B.alpha;
+    ctx.strokeStyle = t === 'er' ? 'rgba(0,0,0,1)' : st.c;
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
-    this._pathFor(st);
-    ctx.stroke();
+    const base = st.w || 4;
+    if (n === 1) {
+      ctx.beginPath();
+      ctx.arc(pts[0], pts[1], this._segWidth(t, base, pts[2], 1, 1, 0, 0, 1, 0) / 2, 0, Math.PI * 2);
+      ctx.fillStyle = ctx.strokeStyle;
+      ctx.fill();
+      ctx.restore();
+      return;
+    }
+    /* 逐段按压力给粗细；相邻且粗细接近的段攒成一条 path，最多 8 档，别一段一次 stroke */
+    const q = Math.max(0.35, base * 0.12);
+    let curW = -1;
+    let open = false;
+    for (let i = 1; i < n; i++) {
+      const x0 = pts[(i - 1) * 3], y0 = pts[(i - 1) * 3 + 1];
+      const x1 = pts[i * 3], y1 = pts[i * 3 + 1];
+      const p = (pts[(i - 1) * 3 + 2] + pts[i * 3 + 2]) / 2;
+      let w = this._segWidth(t, base, p, i, n, x0, y0, x1, y1);
+      if (t === 'pencil') {
+        /* 铅笔的颗粒：用笔画种子做确定性抖动，重画时不会闪 */
+        const sd = (st.seed || 1) * 12.9898 + i * 78.233;
+        w *= 0.88 + 0.24 * Math.abs(Math.sin(sd) % 1);
+      }
+      const qw = Math.max(q, Math.round(w / q) * q);
+      if (qw !== curW) {
+        if (open) ctx.stroke();
+        ctx.lineWidth = qw;
+        ctx.beginPath();
+        ctx.moveTo(x0, y0);
+        curW = qw;
+        open = true;
+      }
+      ctx.lineTo(x1, y1);
+    }
+    if (open) ctx.stroke();
     ctx.restore();
   }
 
@@ -231,9 +301,12 @@ export class InkBoard {
     const n = st.pts.length;
     if (n < 3) return;
     ctx.save();
-    ctx.globalAlpha = st.t === 'hl' ? 0.3 : 1;
+    const BT = InkBoard.BRUSHES[st.t] || InkBoard.BRUSHES.pen;
+    ctx.globalAlpha = BT.alpha;
+    if (st.t === 'hl') ctx.globalCompositeOperation = 'multiply';
     ctx.strokeStyle = st.c;
-    ctx.lineWidth = (st.w || 4) * (st.t === 'hl' ? 3 : 1);
+    ctx.lineWidth = this._segWidth(st.t, st.w || 4, st.pts[n - 1], n / 3, n / 3 + 1,
+      st.pts[n - 3], st.pts[n - 2], pred[0][0], pred[0][1]);
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
     ctx.beginPath();
@@ -291,6 +364,7 @@ export class InkBoard {
       if (this.tool === 'pan') return;     /* 抓手：不在画布上落笔，交给外层做平移 */
       if (this.tool === 'sel') return;     /* 选择：点的是插入的图片/文字，不落笔 */
       if (this.tool === 'lasso') return;   /* 圈选：框选由上层做，别画上去 */
+      if (this.tool === 'text') return;    /* 打字：点一下由上层放输入框 */
       if (this.tool === 'del') {           /* 整笔删除：点一下删掉命中的那一笔 */
         this._delOn = true;
         this._delPushed = false;
@@ -302,7 +376,7 @@ export class InkBoard {
       this._rect = cv.getBoundingClientRect();
       try { cv.setPointerCapture(e.pointerId); } catch (err) { /* 合成事件会抛，忽略 */ }
       const t = this.tool;
-      const st = { t, c: this.color, w: this.size, pts: [] };
+      const st = { t, c: this.color, w: this.size, pts: [], seed: (Math.random() * 997) | 0 };
       this._st = st;
       this._pred = null;
       /* 在落笔前存快照：撤销才能回到「这一笔之前」 */

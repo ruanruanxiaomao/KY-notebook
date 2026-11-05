@@ -176,7 +176,9 @@ export function initNotebook() {
   /* ---------- 页面元素：插入的图片 / 文字 ---------- */
   const layerBelow = $('inkItemsBelow');
   const layerAbove = $('inkItemsAbove');
-  const selIds = new Set();     /* 批量选中：可以同时选多块，一起删 / 一起改字号 */
+  /* 选中：id → { a, b } 表示选中这个文字块里 [a,b) 这几个字；null 表示整块（图片）。
+     这样「框住一个字」就只选那一个字，不会再一大块全亮。 */
+  const sel = new Map();
   let editingId = null;
   let activeTextId = null;      /* 手写转文字往哪个文本框里写 */
   const itBar = $('itBar');     /* 点中元素后浮出的操作条 */
@@ -185,6 +187,7 @@ export function initNotebook() {
   let live = null;             /* 正在写的那一行：{ strokes, item, base, size, gen, pt, ct } */
   let lastPara = null;         /* 刚写完的那一块：{ id, t, size }，接着写就往里续 */
   let lastSize = 40;           /* 上一段用过的字号：写「一」「丶」这种估不出高度时兜底 */
+  let inlineEditor = null;     /* 打字工具：纸面上的就地输入框 */
 
   const pageNow = () => st.pages[st.idx];
 
@@ -249,8 +252,10 @@ export function initNotebook() {
     $('inkStage').classList.toggle('grab', t === 'pan');
     $('inkStage').classList.toggle('selecting', t === 'sel');
     $('inkStage').classList.toggle('lassoing', t === 'lasso');
+    $('inkStage').classList.toggle('texting', t === 'text');
+    if (t !== 'text') { try { finishInlineText(true); } catch (e) { /* 还没定义 */ } }
     if (t !== 'lasso') { try { clearLasso(); } catch (e) { /* 初始化早期还没定义 */ } }
-    if (t !== 'sel') { selIds.clear(); try { closeBar(); } catch (e) { /* 同上 */ } renderItems(); }
+    if (t !== 'sel') { sel.clear(); try { closeBar(); } catch (e) { /* 同上 */ } renderItems(); }
   }
 
   /* 元素层是 1414×1000 的页面坐标系，整体缩放跟纸面对齐，缩放/转屏都不用重算每个元素 */
@@ -258,6 +263,8 @@ export function initNotebook() {
     const k = (board.paper.clientWidth || PAGE_W) / PAGE_W;
     layerBelow.style.transform = `scale(${k})`;
     layerAbove.style.transform = `scale(${k})`;
+    const sl = $('inkSelLayer');
+    if (sl) sl.style.transform = `scale(${k})`;
   }
   if (window.ResizeObserver) new ResizeObserver(syncItemsScale).observe(board.paper);
 
@@ -278,7 +285,7 @@ export function initNotebook() {
     p.items.forEach((it) => {
       const el = document.createElement('div');
       el.className = 'it it-' + it.type
-        + (selIds.has(it.id) ? ' on' : '') + (it.id === activeTextId ? ' cur' : '');
+        + (sel.get(it.id) === null ? ' on' : '') + (it.id === activeTextId ? ' cur' : '');
       el.dataset.id = it.id;
       placeItem(el, it);
       if (it.type === 'image') {
@@ -337,20 +344,37 @@ export function initNotebook() {
   /** 选中集合的包围盒（视口坐标）；多选时操作条挂在整块外面 */
   function selRect() {
     let r = null;
-    for (const it of selItems()) {
-      const el = itemEl(it.id);
-      if (!el) continue;
-      const b = el.getBoundingClientRect();
+    const add = (l, t, rr, bb) => {
       r = r ? {
-        left: Math.min(r.left, b.left), top: Math.min(r.top, b.top),
-        right: Math.max(r.right, b.right), bottom: Math.max(r.bottom, b.bottom),
-      } : { left: b.left, top: b.top, right: b.right, bottom: b.bottom };
+        left: Math.min(r.left, l), top: Math.min(r.top, t),
+        right: Math.max(r.right, rr), bottom: Math.max(r.bottom, bb),
+      } : { left: l, top: t, right: rr, bottom: bb };
+    };
+    const cr = board.cv.getBoundingClientRect();
+    const k = cr.width / board.pageW || 1;
+    for (const [id, range] of sel) {
+      const it = (pageNow() || { items: [] }).items.find((x) => x.id === id);
+      if (!it) continue;
+      if (!range) {
+        const el = itemEl(id);
+        if (!el) continue;
+        const b = el.getBoundingClientRect();
+        add(b.left, b.top, b.right, b.bottom);
+        continue;
+      }
+      const boxes = charBoxes(it).filter((b) => b.i >= range.a && b.i < range.b);
+      if (!boxes.length) continue;
+      const x0 = Math.min(...boxes.map((b) => b.x));
+      const x1 = Math.max(...boxes.map((b) => b.x + b.w));
+      const y0 = Math.min(...boxes.map((b) => b.y));
+      const y1 = Math.max(...boxes.map((b) => b.y + b.h));
+      add(cr.left + x0 * k, cr.top + y0 * k, cr.left + x1 * k, cr.top + y1 * k);
     }
     return r;
   }
 
   function refreshBar() {
-    if (!barItem || !selIds.size) return;
+    if (!barItem || !sel.size) return;
     const r = selRect();
     if (!r) { closeBar(); return; }
     const sr = stageEl.getBoundingClientRect();
@@ -366,24 +390,35 @@ export function initNotebook() {
 
     const list = selItems();
     const texts = list.filter((x) => x.type === 'text');
+    const chars = selCharCount();
+    let blocks = 0;
+    for (const r of sel.values()) if (!r) blocks += 1;
     const del = itBar.querySelector('[data-act="del"]');
     const edit = itBar.querySelector('[data-act="edit"]');
+    const whole = itBar.querySelector('[data-act="whole"]');
     const info = itBar.querySelector('.itbar-info');
-    if (del) del.textContent = list.length > 1 ? `删除 ${list.length} 块` : '删除';
+    if (del) del.textContent = chars && blocks ? `删除 ${chars} 字 + ${blocks} 块`
+      : (chars ? `删除 ${chars} 字` : (blocks > 1 ? `删除 ${blocks} 块` : '删除'));
     if (edit) edit.hidden = !(list.length === 1 && list[0].type === 'text');
+    /* 只选了几个字时，给一个「整块」按钮，方便整段删 / 整段拖 */
+    const oneRange = list.length === 1 && list[0].type === 'text' && sel.get(list[0].id);
+    if (whole) whole.hidden = !oneRange;
     if (info) {
-      info.textContent = list.length > 1
-        ? `已选 ${list.length} 块`
-        : (list[0] && list[0].type === 'image'
+      if (chars || blocks) {
+        info.textContent = chars && blocks ? `${chars} 字 + ${blocks} 块`
+          : (chars ? `已选 ${chars} 个字` : `已选 ${blocks} 块`);
+      } else {
+        info.textContent = list[0] && list[0].type === 'image'
           ? (list[0].tex ? '公式' : '图片')
-          : `${(list[0] && list[0].size) || 32}px`);
+          : `${(list[0] && list[0].size) || 32}px`;
+      }
     }
     /* 只有文字能改字号；纯图片选中时把 A− / A+ 收起来 */
     itBar.classList.toggle('pic', texts.length === 0);
   }
 
   function openBar(it) {
-    if (it && !selIds.has(it.id)) selectOnly(it.id);
+    if (it && !sel.has(it.id)) selectOnly(it.id);
     barItem = it || selItems()[0] || null;
     if (!barItem) { closeBar(); return; }
     itBar.hidden = false;
@@ -414,6 +449,15 @@ export function initNotebook() {
       if (!b) return;
       const act = b.dataset.act;
       if (act === 'del') { removeSelected(); return; }
+      if (act === 'whole') {
+        const list = selItems();
+        if (list.length === 1 && list[0].type === 'text') {
+          sel.set(list[0].id, null);
+          paintSel();
+          refreshBar();
+        }
+        return;
+      }
       if (act === 'edit') {
         const list = selItems();
         if (list.length === 1 && list[0].type === 'text') openTextDialog(list[0]);
@@ -480,8 +524,7 @@ export function initNotebook() {
         while (board.undoStack.length > t.u0 + 1) board.undoStack.pop();
         if (board.undoStack.length === t.u0 + 1) board.undoStack.pop();
       }
-      toggleSel(it.id);
-      if (selIds.has(it.id)) openBar(it); else closeBar();
+      tapSelect(it, t.x, t.y);
     }, 0);
   };
   stageEl.addEventListener('pointerup', endTapSel, true);
@@ -489,33 +532,147 @@ export function initNotebook() {
     if (tapSel && e.pointerId === tapSel.pid) tapSel = null;
   }, true);
 
+  /**
+   * 把文字块拆成「每个字的框」（页面坐标）。用于按字命中、按字选中、高亮和删除。
+   * 按 .tx 的排版规则近似：字号 size、行高 1.3、宽度不够就换行（中文按字换，英文按字近似）。
+   */
+  function charBoxes(it) {
+    const size = it.size || 32;
+    const lh = size * 1.3;
+    const maxW = Math.max(24, it.w || 300);
+    if (!_measureCtx) _measureCtx = document.createElement('canvas').getContext('2d');
+    _measureCtx.font = `${size}px ${textFont()}`;
+    const out = [];
+    let x = 0, row = 0, idx = 0;
+    for (const ch of Array.from(String(it.text || ''))) {
+      if (ch === '\n') { x = 0; row += lh; idx += 1; continue; }
+      const w = _measureCtx.measureText(ch).width;
+      if (x > 0 && x + w > maxW) { x = 0; row += lh; }
+      out.push({ i: idx, ch, x: it.x + x, y: it.y + row, w: Math.max(2, w), h: lh });
+      x += w;
+      idx += 1;
+    }
+    return out;
+  }
+
+  /** 点在文字块的哪个字上（返回字符下标；点在空白处就取最近的字） */
+  function charIndexAt(it, px, py) {
+    const boxes = charBoxes(it);
+    if (!boxes.length) return 0;
+    let best = 0, bestD = Infinity;
+    for (const b of boxes) {
+      if (px >= b.x - 2 && px <= b.x + b.w + 2 && py >= b.y && py <= b.y + b.h) return b.i;
+      const dx = px < b.x ? b.x - px : (px > b.x + b.w ? px - b.x - b.w : 0);
+      const dy = py < b.y ? b.y - py : (py > b.y + b.h ? py - b.y - b.h : 0);
+      const d = dx * dx + dy * dy;
+      if (d < bestD) { bestD = d; best = b.i; }
+    }
+    return best;
+  }
+
+  /** 视口坐标 → 页面坐标 */
+  function pageAt(cx, cy) {
+    const r = board.cv.getBoundingClientRect();
+    const k = r.width / board.pageW || 1;
+    return [(cx - r.left) / k, (cy - r.top) / k];
+  }
+
+  function selCount() { return sel.size; }
+  function selCharCount() {
+    let n = 0;
+    for (const r of sel.values()) if (r) n += Math.max(0, r.b - r.a);
+    return n;
+  }
+
   function paintSel() {
+    /* 整块选中的（图片）才画那个大框；文字只画「字」的高亮 */
     document.querySelectorAll('.ink-items .it').forEach((x) => {
-      x.classList.toggle('on', selIds.has(x.dataset.id));
+      x.classList.toggle('on', sel.get(x.dataset.id) === null);
     });
-    /* 多选时不要在每一块上都挂 ✕ 和缩放手柄，太乱；批量操作走上面的操作条 */
-    const multi = selIds.size > 1;
+    const layer = $('inkSelLayer');
+    if (layer) {
+      layer.innerHTML = '';
+      const p = pageNow();
+      if (p && Array.isArray(p.items)) {
+        for (const [id, r] of sel) {
+          if (!r) continue;
+          const it = p.items.find((x) => x.id === id);
+          if (!it) continue;
+          let run = null;
+          const flush = () => {
+            if (!run) return;
+            const d = document.createElement('div');
+            d.className = 'ch';
+            d.style.left = run.x + 'px';
+            d.style.top = run.y + 'px';
+            d.style.width = run.w + 'px';
+            d.style.height = run.h + 'px';
+            layer.appendChild(d);
+            run = null;
+          };
+          for (const b of charBoxes(it)) {
+            if (b.i < r.a || b.i >= r.b) continue;
+            if (run && Math.abs(b.y - run.y) < 0.5 && b.x <= run.x + run.w + 1.5) {
+              run.w = b.x + b.w - run.x;
+            } else { flush(); run = { x: b.x, y: b.y, w: b.w, h: b.h }; }
+          }
+          flush();
+        }
+      }
+    }
+    const multi = sel.size > 1;
     layerAbove.classList.toggle('multi', multi);
     layerBelow.classList.toggle('multi', multi);
   }
 
   /** 只选这一块（清掉其它） */
   function selectOnly(id) {
-    selIds.clear();
-    if (id) selIds.add(id);
-    paintSel();
-  }
-
-  /** 点一下：加进选中集合 / 从集合里去掉（批量选择就是这么攒起来的） */
-  function toggleSel(id) {
-    if (selIds.has(id)) selIds.delete(id); else selIds.add(id);
+    sel.clear();
+    if (id) sel.set(id, null);
     paintSel();
   }
 
   function selItems() {
     const p = pageNow();
     if (!p || !Array.isArray(p.items)) return [];
-    return p.items.filter((x) => selIds.has(x.id));
+    return p.items.filter((x) => sel.has(x.id));
+  }
+
+  /** 点一下某个元素：文字按「字」选，图片整块选；返回现在是否处于选中态 */
+  function tapSelect(it, cx, cy) {
+    if (it.type === 'text') {
+      const [px, py] = pageAt(cx, cy);
+      const idx = charIndexAt(it, px, py);
+      const on = toggleChar(it, idx);
+      if (on) openBar(it); else closeBar();
+      return on;
+    }
+    if (sel.get(it.id) === null) { sel.delete(it.id); paintSel(); closeBar(); return false; }
+    sel.clear();
+    sel.set(it.id, null);
+    paintSel();
+    openBar(it);
+    return true;
+  }
+
+  /**
+   * 点一个文字块里的某个字：
+   *  · 点在已选中的字上 → 取消这块的选中
+   *  · 点在选中范围的左右隔壁 → 把范围扩一个字（连着点就能选一段）
+   *  · 其它情况 → 重新只选这一个字
+   */
+  function toggleChar(it, idx) {
+    const cur = sel.get(it.id);
+    if (cur && idx >= cur.a && idx < cur.b) { sel.delete(it.id); paintSel(); return false; }
+    if (cur && (idx === cur.b || idx === cur.a - 1)) {
+      sel.set(it.id, { a: Math.min(cur.a, idx), b: Math.max(cur.b, idx + 1) });
+      paintSel();
+      return true;
+    }
+    sel.clear();
+    sel.set(it.id, { a: idx, b: idx + 1 });
+    paintSel();
+    return true;
   }
 
   function startDrag(e, it, el) {
@@ -536,8 +693,8 @@ export function initNotebook() {
       if (!moved) {
         if (Math.hypot(ev.clientX - s0.x, ev.clientY - s0.y) < 4) return;   /* 还没动：先别改选中 */
         moved = true;
-        /* 拖动：如果它不在选中集合里，就只选它；已经在集合里就保持多选，只拖这一块 */
-        if (!selIds.has(it.id)) selectOnly(it.id);
+        /* 拖动：没选中过就整块选它；已经按字选中的保持原样（拖的还是这一块） */
+        if (!sel.has(it.id)) { sel.clear(); sel.set(it.id, null); paintSel(); }
         openBar(it);
       }
       it.x = Math.round(s0.ox + (ev.clientX - s0.x) / k);
@@ -548,11 +705,8 @@ export function initNotebook() {
     const up = () => {
       window.removeEventListener('pointermove', move);
       window.removeEventListener('pointerup', up);
-      /* 没拖动 = 点了一下：加进 / 移出批量选中 */
-      if (!moved) {
-        toggleSel(it.id);
-        if (selIds.has(it.id)) openBar(it); else closeBar();
-      }
+      /* 没拖动 = 点了一下：文字按字选，图片整块选 */
+      if (!moved) tapSelect(it, e.clientX, e.clientY);
       saveSoon(true);
     };
     window.addEventListener('pointermove', move);
@@ -621,27 +775,44 @@ export function initNotebook() {
     p.items = p.items.filter((x) => x.id !== id);
     if (lastPara && lastPara.id === id) lastPara = null;   /* 别往删掉的块里续写 */
     if (activeTextId === id) activeTextId = null;
-    selIds.delete(id);
+    sel.delete(id);
     renderItems();
     saveSoon(true);
     toast('已删除元素');
   }
 
-  /** 把选中的所有块一起删掉（批量） */
+  /** 删掉选中的内容：文字只删选中的那几个字，图片整块删 */
   function removeSelected() {
-    const ids = [...selIds];
-    if (!ids.length) return 0;
     const p = pageNow();
-    if (!p || !Array.isArray(p.items)) return 0;
-    p.items = p.items.filter((x) => ids.indexOf(x.id) < 0);
-    if (lastPara && ids.indexOf(lastPara.id) >= 0) lastPara = null;
-    if (activeTextId && ids.indexOf(activeTextId) >= 0) activeTextId = null;
-    selIds.clear();
+    if (!p || !Array.isArray(p.items) || !sel.size) return 0;
+    let n = 0;
+    for (const [id, r] of [...sel]) {
+      const it = p.items.find((x) => x.id === id);
+      if (!it) continue;
+      if (!r) {
+        p.items = p.items.filter((x) => x.id !== id);
+        if (lastPara && lastPara.id === id) lastPara = null;
+        if (activeTextId === id) activeTextId = null;
+        n += 1;
+        continue;
+      }
+      const t = String(it.text || '');
+      it.text = t.slice(0, r.a) + t.slice(r.b);
+      if (!it.text.trim()) {
+        p.items = p.items.filter((x) => x.id !== id);
+        if (lastPara && lastPara.id === id) lastPara = null;
+        if (activeTextId === id) activeTextId = null;
+      } else {
+        fitItemWidth(it);
+      }
+      n += 1;
+    }
+    sel.clear();
     closeBar();
     renderItems();
     saveSoon(true);
-    toast(ids.length > 1 ? `已删除 ${ids.length} 块内容` : '已删除元素');
-    return ids.length;
+    toast(`已删除 ${n} 处内容`);
+    return n;
   }
 
   /* ---------- 手写转文字 ---------- */
@@ -984,7 +1155,8 @@ export function initNotebook() {
 
   board.onStrokeEnd = (stroke) => {
     if (hwrMode === 'off' || !st.note || st.mode === 'md') return;
-    if (stroke.t !== 'pen') return;          /* 荧光笔、橡皮不参与 */
+    /* 除了荧光笔和橡皮，各种笔写出来的都参与识别（以前只认 'pen'，换了圆珠笔就不认了） */
+    if (stroke.t === 'hl' || stroke.t === 'er') return;
 
     if (hwrMode === 'formula') {
       pendingTex.add(stroke);
@@ -1089,7 +1261,7 @@ export function initNotebook() {
       if (selBox === state) selBox = null;
       box.remove();
       if (!state.moved) {           /* 就是点了一下空白：清空选中 */
-        selIds.clear();
+        sel.clear();
         closeBar();
         renderItems();
         return;
@@ -1098,19 +1270,32 @@ export function initNotebook() {
       const T = Math.min(y0, state.y1), B = Math.max(y0, state.y1);
       const p = pageNow();
       if (!p || !Array.isArray(p.items)) return;
-      const hit = [];
+      /* 框到哪几个字就选哪几个字（不再整块整块地选） */
+      const [px0, py0] = pageAt(L, T);
+      const [px1, py1] = pageAt(R, B);
+      const pl = Math.min(px0, px1), pr = Math.max(px0, px1);
+      const pt = Math.min(py0, py1), pb = Math.max(py0, py1);
+      sel.clear();
+      let chars = 0, blocks = 0;
       for (const it of p.items) {
         const el = itemEl(it.id);
         if (!el) continue;
-        const r = el.getBoundingClientRect();
-        if (r.right >= L && r.left <= R && r.bottom >= T && r.top <= B) hit.push(it.id);
+        const er = el.getBoundingClientRect();
+        if (er.right < L || er.left > R || er.bottom < T || er.top > B) continue;
+        if (it.type !== 'text') { sel.set(it.id, null); blocks += 1; continue; }
+        let a = Infinity, b = -Infinity;
+        for (const box of charBoxes(it)) {
+          if (box.x + box.w < pl || box.x > pr || box.y + box.h < pt || box.y > pb) continue;
+          a = Math.min(a, box.i);
+          b = Math.max(b, box.i + 1);
+        }
+        if (b > a) { sel.set(it.id, { a, b }); chars += b - a; }
       }
-      selIds.clear();
-      hit.forEach((id) => selIds.add(id));
       paintSel();
-      if (!hit.length) { closeBar(); toast('这一框里没有文字或图片', true); return; }
+      if (!sel.size) { closeBar(); toast('这一框里没有文字或图片', true); return; }
       openBar(selItems()[0]);
-      toast(`已选中 ${hit.length} 块，可以一起改字号或删除`);
+      toast(chars && blocks ? `已选中 ${chars} 个字 + ${blocks} 块`
+        : (chars ? `已选中 ${chars} 个字` : `已选中 ${blocks} 块`));
     };
     window.addEventListener('pointermove', move);
     window.addEventListener('pointerup', up);
@@ -1145,10 +1330,67 @@ export function initNotebook() {
     setTimeout(() => $('textInput').focus(), 30);
   }
 
-  $('inkAddText').onclick = () => {
-    if (!st.note || st.mode === 'md') return;
-    openTextDialog(null);
-  };
+  /* ---------- 打字工具：点一下纸面，就地输入（Enter 结束，Esc 取消） ---------- */
+  function startInlineText(e) {
+    if (inlineEditor) finishInlineText(true);
+    const [px, py] = pageAt(e.clientX, e.clientY);
+    const sc = (board.paper.clientWidth || PAGE_W) / PAGE_W;
+    const size = 36;
+    const el = document.createElement('div');
+    el.className = 'inline-text';
+    el.contentEditable = 'true';
+    el.spellcheck = false;
+    el.style.left = Math.round(px * sc) + 'px';
+    el.style.top = Math.round(py * sc) + 'px';
+    el.style.fontSize = Math.round(size * sc) + 'px';
+    el.style.color = st.color || '#1f1c18';
+    el.style.maxWidth = Math.round(Math.max(120, Math.min(560, board.pageW - px - 16)) * sc) + 'px';
+    board.paper.appendChild(el);
+    inlineEditor = { el, px, py, size };
+    setTimeout(() => el.focus(), 0);
+    el.addEventListener('keydown', (ev) => {
+      ev.stopPropagation();
+      if (ev.key === 'Enter' && !ev.shiftKey) { ev.preventDefault(); finishInlineText(true); }
+      else if (ev.key === 'Escape') { ev.preventDefault(); finishInlineText(false); }
+    });
+    el.addEventListener('blur', () => finishInlineText(true));
+    toast('直接打字，Enter 结束（Shift+Enter 换行）');
+  }
+
+  function finishInlineText(commit) {
+    const ed = inlineEditor;
+    if (!ed) return;
+    inlineEditor = null;
+    const txt = String(ed.el.innerText || '').replace(/\u200b/g, '').replace(/\n+$/, '');
+    ed.el.remove();
+    if (!commit || !txt.trim()) return;
+    const p = pageNow();
+    if (!p) return;
+    if (!Array.isArray(p.items)) p.items = [];
+    const it = {
+      id: uid('it'), type: 'text', z: 'above', text: txt, size: ed.size,
+      color: st.color || '#1f1c18', x: Math.round(ed.px), y: Math.round(ed.py),
+      w: 200, h: Math.round(ed.size * 1.4),
+    };
+    fitItemWidth(it);
+    p.items.push(it);
+    renderItems();
+    saveSoon(true);
+  }
+
+  stageEl.addEventListener('pointerdown', (e) => {
+    if (st.tool !== 'text' || !st.note || st.mode === 'md') return;
+    if (e.target.closest('.inline-text')) return;
+    const hit = e.target.closest('.it') ? hitItemAt(e.clientX, e.clientY) : null;
+    if (hit) {
+      e.preventDefault();
+      if (hit.type === 'text') openTextDialog(hit);
+      return;
+    }
+    e.preventDefault();
+    startInlineText(e);
+  }, true);
+
   $('textCancel').onclick = () => { editingId = null; $('dlgText').close(); };
   $('textOk').onclick = () => {
     const txt = $('textInput').value;
@@ -1259,14 +1501,14 @@ export function initNotebook() {
 
   /* 选择工具下点空白取消选中；Delete / Backspace 删掉选中的元素 */
   $('inkStage').addEventListener('pointerdown', (e) => {
-    if (st.tool === 'sel' && !e.target.closest('.it') && selIds.size) {
-      selIds.clear();
+    if (st.tool === 'sel' && !e.target.closest('.it') && sel.size) {
+      sel.clear();
       closeBar();
       renderItems();
     }
   });
   window.addEventListener('keydown', (e) => {
-    if (!st.note || st.mode === 'md' || st.tool !== 'sel' || !selIds.size) return;
+    if (!st.note || st.mode === 'md' || st.tool !== 'sel' || !sel.size) return;
     const tag = (e.target.tagName || '').toLowerCase();
     if (tag === 'input' || tag === 'textarea') return;
     if (e.key === 'Delete' || e.key === 'Backspace') {
@@ -1338,7 +1580,7 @@ export function initNotebook() {
     st.idx = Math.max(0, Math.min(st.pages.length - 1, i));
     const p = st.pages[st.idx];
     if (!Array.isArray(p.items)) p.items = [];
-    selIds.clear();
+    sel.clear();
     activeTextId = null;      /* 换页了，手写文字重新找个框 */
     lastPara = null;
     try { commitLine(); } catch (e) { /* 初始化早期还没定义 */ }

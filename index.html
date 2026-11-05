@@ -62,11 +62,17 @@
 
       <div class="tools" id="inkTools">
         <div class="group">
-          <button class="tool on" data-tool="pen" title="笔">✏️</button>
-          <button class="tool" data-tool="hl" title="荧光笔">🖍</button>
-          <button class="tool" data-tool="er" title="橡皮">🧽</button>
+          <button class="tool on" data-tool="pen" title="钢笔（跟压力变粗细）">🖋</button>
+          <button class="tool" data-tool="ball" title="圆珠笔（粗细均匀，写小字清楚）">🖊</button>
+          <button class="tool" data-tool="pencil" title="铅笔（淡、有颗粒）">✏️</button>
+          <button class="tool" data-tool="brush" title="毛笔（起收笔有锋）">🖌</button>
+          <button class="tool" data-tool="calli" title="书法笔（扁笔尖，横细竖粗）">✒️</button>
+          <button class="tool" data-tool="hl" title="荧光笔（叠在字上不糊）">🖍</button>
+          <button class="tool" data-tool="er" title="橡皮（点一下整笔删掉）">🧽</button>
+        </div>
+        <div class="group">
           <button class="tool" data-tool="pan" title="抓手：拖动平移画布">✋</button>
-          <button class="tool" data-tool="sel" title="选择：点选/拖动插入的图片和文字">↖</button>
+          <button class="tool" data-tool="sel" title="选择：点选文字（按字选）/ 图片，拖框批量选">↖</button>
           <button class="tool" data-tool="lasso" title="圈选：框住一片笔迹，可以就地转成文字或公式">⬚</button>
         </div>
         <div class="group" id="inkColors"></div>
@@ -79,7 +85,7 @@
         <div class="group">
           <button class="tool" id="inkHwrText" title="画布自动转文字：开着的时候，写完停笔，笔迹就地变成文字">✍</button>
           <button class="tool" id="inkHwrTex" title="画布自动转公式：开着的时候，写完停笔，手写公式变成 LaTeX 排版">∑</button>
-          <button class="tool" id="inkAddText" title="插入文字块">T</button>
+          <button class="tool" data-tool="text" title="打字：点一下纸面就能输入文字（Enter 结束）">T</button>
           <button class="tool" id="inkAddImage" title="插入图片到本页">🖼</button>
           <button class="tool" id="inkAddPdf" title="插入 PDF（每页追加成新的一页，可直接批注）">📄</button>
           <input type="file" id="inkFileImage" accept="image/*" hidden>
@@ -114,6 +120,8 @@
           <div class="ink-items below" id="inkItemsBelow"></div>
           <canvas id="inkCv"></canvas>
           <div class="ink-items above" id="inkItemsAbove"></div>
+          <!-- 按字选中的高亮（单独一层，不跟着 renderItems 重建） -->
+          <div class="ink-sel-layer" id="inkSelLayer"></div>
         </div>
       </div>
 
@@ -129,6 +137,7 @@
       <div class="itbar" id="itBar" hidden>
         <button data-act="minus" title="字号小一点">A−</button>
         <button data-act="plus" title="字号大一点">A+</button>
+        <button data-act="whole" title="选中整块文字（不然是按字选）">整块</button>
         <button data-act="edit" title="改文字内容">改字</button>
         <button data-act="del" class="danger" title="删掉这块内容">删除</button>
         <span class="itbar-info"></span>
