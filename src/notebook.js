@@ -26,7 +26,11 @@ export function initNotebook() {
   const starBtn = $('inkStar');
   const srcBar = $('inkSrcBar');
 
-  const board = new InkBoard($('inkCv'), $('inkPaper'), $('inkStage'));
+  const boardA = new InkBoard($('inkCv'), $('inkPaper'), $('inkStage'));
+  /* P1-16 / v3.23 双栏：右栏是第二个 InkBoard，board 指向「活动栏」，
+     这样工具栏（颜色/线宽/笔/撤销/缩放）不用改就自动作用在活动栏上 */
+  let board = boardA;
+  const P = { on: false, act: 0, i2: 1, b2: null, stage2: null, wrap: null };
   const st = { note: null, mode: 'ink', md: '', mdEditing: false, pages: [], idx: 0, tool: 'pen', color: COLORS[0], size: SIZES[1], saveT: 0 };
 
   /* ---------- 工具栏 ---------- */
@@ -2086,9 +2090,29 @@ export function initNotebook() {
       return;
     }
     if (!st.pages.length) return;
-    const page = st.pages[st.idx];
+    const idx = (P.on && P.act === 1) ? P.i2 : st.idx;
+    const page = st.pages[idx];
     page.strokes = board.getStrokes();
     page.template = board.template;
+    if (P.on && P.b2) {
+      /* 双栏：另一栏那一页也一起存（不然切回来发现刚写的没了） */
+      const other = (P.act === 1) ? st.idx : P.i2;
+      const ob = (P.act === 1) ? boardA : P.b2;
+      const p2 = st.pages[other];
+      if (p2 && ob) {
+        p2.strokes = ob.getStrokes();
+        p2.template = ob.template;
+        await store.putPage({
+          id: st.note.id + '#' + p2.no,
+          noteId: st.note.id,
+          no: p2.no,
+          template: p2.template,
+          strokes: p2.strokes,
+          items: p2.items || [],
+          bg: p2.bg || null,
+        });
+      }
+    }
     await store.putPage({
       id: `${st.note.id}#${page.no}`,
       noteId: st.note.id,
@@ -2121,6 +2145,18 @@ export function initNotebook() {
 
   /* ---------- 页面 ---------- */
   function loadPage(i) {
+    if (P.on && P.act === 1) {
+      if (!P.b2) return;
+      P.i2 = Math.max(0, Math.min(st.pages.length - 1, i));
+      const p2 = st.pages[P.i2] || { template: 'blank', strokes: [], items: [], bg: null };
+      P.b2.loadPage({ template: p2.template, bg: p2.bg, strokes: p2.strokes || [], items: p2.items || [] });
+      syncInfo();
+      return;
+    }
+    return loadPage1(i);
+  }
+
+  function loadPage1(i) {
     st.idx = Math.max(0, Math.min(st.pages.length - 1, i));
     const p = st.pages[st.idx];
     if (!Array.isArray(p.items)) p.items = [];
@@ -2137,8 +2173,85 @@ export function initNotebook() {
     pageInfo.textContent = `第 ${st.idx + 1} / ${st.pages.length} 页`;
   }
 
-  $('inkPrev').onclick = () => { if (st.idx > 0) { saveNow(); loadPage(st.idx - 1); } };
-  $('inkNext').onclick = () => { if (st.idx < st.pages.length - 1) { saveNow(); loadPage(st.idx + 1); } };
+  function curIdx() { return (P.on && P.act === 1) ? P.i2 : st.idx; }
+  // 双栏：点哪一栏哪一栏就是活动栏
+  function onPaneDown(k) {
+    if (!P.on) return;
+    P.act = k;
+    board = (k === 1 && P.b2) ? P.b2 : boardA;
+    boardA.stage.classList.toggle('pane-act', k === 0);
+    if (P.stage2) P.stage2.classList.toggle('pane-act', k === 1);
+    board.tool = st.tool;
+    board.color = st.color;
+    board.size = st.size;
+    syncInfo();
+  }
+  function syncInfo() {
+    if (!P.on) pageInfo.textContent = `第 ${st.idx + 1} / ${st.pages.length} 页`;
+    else pageInfo.textContent = `左 ${st.idx + 1} · 右 ${P.i2 + 1} / ${st.pages.length}`;
+  }
+  function splitOn() {
+    if (P.on || !st.note) return;
+    const ed = $('inkStage');
+    const host = ed.parentNode;
+    const wrap = document.createElement('div');
+    wrap.className = 'split-wrap';
+    host.insertBefore(wrap, ed);
+    wrap.appendChild(ed);
+    const s2 = ed.cloneNode(true);
+    s2.id = 'inkStage2';
+    s2.className = 'stage';
+    const cv2 = s2.querySelector('canvas');
+    const paper2 = cv2 ? cv2.parentNode : null;
+    const spot = function (node) { return node; };
+    /* 清掉重复 id，免得 $() 取到右栏 */
+    [s2, paper2, cv2].forEach(function (el) { if (el) el.removeAttribute('id'); });
+    s2.querySelectorAll('[id]').forEach(function (el) { el.removeAttribute('id'); });
+    wrap.appendChild(s2);
+    P.stage2 = s2;
+    P.on = true;
+    P.wrap = wrap;
+    P.b2 = new InkBoard(cv2, paper2, s2);
+    P.b2.tool = st.tool; P.b2.color = st.color; P.b2.size = st.size;
+    P.b2.zoom = boardA.zoom;
+    P.i2 = (st.idx + 1 < st.pages.length) ? (st.idx + 1)
+      : Math.max(0, Math.min(st.pages.length - 1, st.idx - 1 !== st.idx ? st.idx - 1 : st.idx));
+    if (st.pages.length > 1 && P.i2 === st.idx) P.i2 = (st.idx === 0) ? 1 : st.idx - 1;
+    board = P.b2;
+    P.act = 1;
+    s2.classList.add('pane-act');
+    boardA.stage.classList.remove('pane-act');
+    s2.addEventListener('pointerdown', () => onPaneDown(1), true);
+    if (!P.bound) {
+      boardA.stage.addEventListener('pointerdown', () => onPaneDown(0), true);
+      P.bound = true;
+    }
+    loadPage(P.i2);
+    if (typeof toast === 'function') toast('双栏：左边第 ' + (st.idx + 1) + ' 页，右边第 ' + (P.i2 + 1) + ' 页；点哪栏画哪栏');
+  }
+  function splitOff() {
+    if (!P.on) return;
+    try { saveNow(); } catch (e) { /* 关栏时存不上不影响退出 */ }
+    const ed = $('inkStage');
+    const wrap = P.wrap;
+    if (wrap && wrap.parentNode) {
+      wrap.parentNode.insertBefore(ed, wrap);
+      wrap.remove();
+    }
+    P.on = false;
+    P.act = 0;
+    P.b2 = null;
+    P.stage2 = null;
+    P.wrap = null;
+    board = boardA;
+    boardA.stage.classList.remove('pane-act');
+    loadPage(st.idx);
+  }
+  const splitBtn = $('inkSplit');
+  if (splitBtn) splitBtn.onclick = () => { if (P.on) splitOff(); else splitOn(); };
+
+  $('inkPrev').onclick = () => { const i = curIdx(); if (i > 0) { saveNow(); loadPage(i - 1); } };
+  $('inkNext').onclick = () => { const i = curIdx(); if (i < st.pages.length - 1) { saveNow(); loadPage(i + 1); } };
   $('inkAddPage').onclick = async () => {
     await saveNow();
     st.pages.push({ no: st.pages.length, template: 'blank', strokes: [], items: [], bg: null });
@@ -2214,6 +2327,7 @@ export function initNotebook() {
   };
 
   async function openNote(id) {
+    if (P.on) splitOff();
     const n = await store.getNote(id);
     if (!n) return;
     if (n.kind === 'md') { await openMdNote(n); localStorage.setItem(LS_LAST, id); return; }
@@ -2251,6 +2365,7 @@ export function initNotebook() {
   }
 
   async function closeNote() {
+    if (P.on) splitOff();
     /* 先等这一页存完再清状态：saveNow 后半段还要写 note.thumb / updatedAt */
     const opened = st.note;
     await saveNow();
@@ -2694,12 +2809,21 @@ export function initNotebook() {
     return id;
   }
 
-  const api = { renderLib, newNote, openNote, board, hwr, state: st, addBgPage, addBgNote, addMdNote, toast,
+  const api = { renderLib, newNote, openNote, get board() { return board; }, hwr, state: st, addBgPage, addBgNote, addMdNote, toast,
     renderItems, openHandPad, convertInk, setHwrMode, refreshFont, setHud: (on) => board.setHud(on),
     getLayout, setLayout, applyLayoutToPage, tidyPage, openFmt };
   noteApi = api;
   /* 上次开了延迟面板就继续开着（调试用，不影响写字） */
   try { if (localStorage.getItem('kynb_hud') === '1') board.setHud(true); } catch (e) { /* 无痕模式 */ }
+  api.paneStrokes = () => ({
+    act: P.act,
+    on: P.on,
+    a: boardA.getStrokes().length,
+    b: P.b2 ? P.b2.getStrokes().length : -1,
+    aIdx: st.idx,
+    bIdx: P.i2,
+    info: pageInfo.textContent,
+  });
   return api;
 }
 

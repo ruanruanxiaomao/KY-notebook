@@ -229,12 +229,27 @@ export class InkBoard {
       return;
     }
     /* 逐段按压力给粗细；相邻且粗细接近的段攒成一条 path，最多 8 档，别一段一次 stroke */
+    /* 平滑坐标：手指/触屏的采样本身有 1–3px 的高频抖动，直接用原始点画就是「折线」。
+       这里对坐标做一次 3 抽头加权（0.25 / 0.5 / 0.25），只影响画法、不改 st.pts 里的数据；
+       端点保持原样，长直线上的交替抖动会被磨平，粗细与压力不受影响。 */
+    const sx = new Array(n), sy = new Array(n);
+    for (let i = 0; i < n; i++) {
+      const x = pts[i * 3], y = pts[i * 3 + 1];
+      if (i === 0 || i === n - 1) { sx[i] = x; sy[i] = y; continue; }
+      sx[i] = pts[(i - 1) * 3] * 0.25 + x * 0.5 + pts[(i + 1) * 3] * 0.25;
+      sy[i] = pts[(i - 1) * 3 + 1] * 0.25 + y * 0.5 + pts[(i + 1) * 3 + 1] * 0.25;
+    }
+
     const q = Math.max(0.35, base * 0.12);
     let curW = -1;
     let open = false;
+    /* 折线成段是因为「每个采样点之间直接 lineTo」：手指采样本身有 1–3px 抖动，
+       逐段直连就把抖动画成了看得见的折角。改成过相邻中点的二次曲线，控制点用真实采样点，
+       曲线仍然贴着笔迹，但折角被磨圆了（笔迹数据不变，只是画法变了）。 */
+    let px = sx[0], py = sy[0];
     for (let i = 1; i < n; i++) {
-      const x0 = pts[(i - 1) * 3], y0 = pts[(i - 1) * 3 + 1];
-      const x1 = pts[i * 3], y1 = pts[i * 3 + 1];
+      const x0 = px, y0 = py;
+      const x1 = sx[i], y1 = sy[i];
       const p = (pts[(i - 1) * 3 + 2] + pts[i * 3 + 2]) / 2;
       let w = this._segWidth(t, base, p, i, n, x0, y0, x1, y1);
       if (t === 'pencil') {
@@ -247,13 +262,20 @@ export class InkBoard {
         if (open) ctx.stroke();
         ctx.lineWidth = qw;
         ctx.beginPath();
-        ctx.moveTo(x0, y0);
+        ctx.moveTo(px, py);
         curW = qw;
         open = true;
       }
-      ctx.lineTo(x1, y1);
+      const mx = (px + x1) / 2;
+      const my = (py + y1) / 2;
+      ctx.quadraticCurveTo(px, py, mx, my);
+      px = x1;
+      py = y1;
     }
-    if (open) ctx.stroke();
+    if (open) {
+      ctx.lineTo(px, py);
+      ctx.stroke();
+    }
     ctx.restore();
   }
 
@@ -365,6 +387,12 @@ export class InkBoard {
 
     const down = (e) => {
       if (e.button !== undefined && e.button !== 0 && e.pointerType === 'mouse') return;
+      /* 多指/手掌：同一时刻只认一根指针。以前不判 pointerId，写字的指头还在动、
+         另一根手指（或手掌）又按下来，两路 move 会把点插进同一笔，直线变成折线。 */
+      if (this._st) return;
+      if (e.pointerType === 'touch' && this._penAt && (performance.now() - this._penAt) < 1500) {
+        return;   /* 手写笔在附近时，手指一律当掌拒，不落笔 */
+      }
       e.preventDefault();
       if (this.tool === 'pan') return;     /* 抓手：不在画布上落笔，交给外层做平移 */
       if (this.tool === 'sel') return;     /* 选择：点的是插入的图片/文字，不落笔 */
@@ -379,11 +407,13 @@ export class InkBoard {
       }
       /* 落笔时刷一次矩形：整笔期间复用，避免每个采样点都触发一次强制布局 */
       this._rect = cv.getBoundingClientRect();
+      if (e.pointerType === 'pen') this._penAt = performance.now();
       if (this.onStrokeStart) this.onStrokeStart();
       try { cv.setPointerCapture(e.pointerId); } catch (err) { /* 合成事件会抛，忽略 */ }
       const t = this.tool;
       const st = { t, c: this.color, w: this.size, pts: [], seed: (Math.random() * 997) | 0 };
       this._st = st;
+      this._pid = e.pointerId;
       this._pred = null;
       /* 在落笔前存快照：撤销才能回到「这一笔之前」 */
       this.pushUndo();
@@ -395,6 +425,7 @@ export class InkBoard {
 
     /** isRaw=true 来自 pointerrawupdate（平台允许的最高频率，早于被节流的 pointermove） */
     const move = (e, isRaw) => {
+      if (this._st && this._pid !== undefined && e.pointerId !== this._pid) return;
       if (this._delOn) { this.eraseAt(e); return; }
       if (!this._st) return;
       if (!isRaw && this._rawAt && (e.timeStamp || performance.now()) - this._rawAt < 120) {
@@ -441,6 +472,9 @@ export class InkBoard {
 
     const up = (e) => {
       this._delOn = false;
+      if (e && e.pointerType === 'pen') this._penAt = performance.now();
+      if (e && this._pid !== undefined && e.pointerId !== undefined && e.pointerId !== this._pid) return;
+      this._pid = undefined;
       if (!this._st) return;
       const st = this._st;
       this._st = null;
