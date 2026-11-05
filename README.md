@@ -161,6 +161,8 @@ src/hwrpad.js     手写板（自己的小画布、停笔自动识别、候选�
 src/main.js       标签切换、设置与提示词对话框
 src/agent.js      连电脑：浏览电脑上的语料、调 bridge 生成笔记 / 导图
 bridge/serve.py   电脑端小服务（零依赖）：读语料 + 调模型 + 回传 Markdown / 大纲
+bridge/kynb.py    命令行客户端：ping / ls / gen / push / genpush / outbox
+bridge/mcp_server.py  MCP server（stdio）：在 WorkBuddy 连接器里加一次，就能让 Agent 直接调
 vendor/hwr/       离线识别资源（模型 16.6 MB + ORT WASM 11.2 MB，来源与许可见该目录 README）
 docs/screenshots/ 截图
 ```
