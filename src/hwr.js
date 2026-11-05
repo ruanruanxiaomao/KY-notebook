@@ -5,6 +5,8 @@
    - 两者都吃「一张白底墨迹图」：inkToCanvas() 负责把笔画光栅化
 */
 
+import { toSimp } from './t2s.js';
+
 const DIR = '/vendor/hwr/';
 const ORT_JS = DIR + 'ort.wasm.min.js';
 const LS_HWR = 'kynb_hwr';
@@ -65,7 +67,8 @@ export function inkToCanvas(strokes) {
   if (!isFinite(x0)) return null;
   const bw = Math.max(1, x1 - x0);
   const bh = Math.max(1, y1 - y0);
-  const pad = Math.max(6, Math.max(bw, bh) * 0.10);
+  /* 留白要够：笔画本身有粗细，最后一笔贴边时会被切掉半个字（「apple」认成「appl」就是这么来的） */
+  const pad = Math.max(10, Math.max(bw, bh) * 0.16);
   /* 归一化到「高约 120px」：太小模型看不清，太大白算 */
   const target = 120;
   const k = Math.max(0.4, Math.min(4, target / (bh + pad * 2)));
@@ -231,7 +234,7 @@ export async function recognizeStrokes(strokes) {
   const parts = splitLongLine(strokes);
   const all = bboxOf(strokes) || { h: 24 };
   const H = Math.max(8, all.h);
-  let text = '', score = 1, ms = 0, prevX1 = null;
+  let text = '', score = 1, ms = 0, prevX1 = null, cands = null, dataUrl = '';
   for (const p of parts) {
     const ink = inkToCanvas(p.strokes);
     if (!ink) continue;
@@ -239,12 +242,16 @@ export async function recognizeStrokes(strokes) {
     try { r = await recognizeLocal(ink); } catch (e) { continue; }
     ms += r.ms;
     if (!r.text) continue;
+    if (!dataUrl) dataUrl = ink.dataUrl;
     if (text && prevX1 != null && p.x0 - prevX1 > H * 0.9) text += ' ';
     text += r.text;
     score = Math.min(score, r.score);
     prevX1 = p.x1;
+    /* 只有一整段时才能给「整行」的候选；切过段就只留一个结果 */
+    if (parts.length === 1 && r.cands && r.cands.length) cands = r.cands;
   }
-  return { text: text.trim(), score, ms, parts: parts.length };
+  return { text: text.trim(), score, ms, parts: parts.length, dataUrl,
+    cands: cands || [{ text: text.trim(), score }] };
 }
 
 /**
@@ -409,7 +416,83 @@ function prep(canvas) {
   return { data: out, w, h: H };
 }
 
-/** 离线识别：返回 { text, ms } */
+/**
+ * CTC 前缀 beam search：在贪心之外再留几个候选。
+ * 手写识别经常「差一个字」，候选条里点一下就能改，比擦了重写快得多。
+ */
+function ctcBeam(frames, chars, beamWidth, keep) {
+  const T = frames.length;
+  const BW = beamWidth || 8;
+  const KEEP = keep || 4;
+  let beams = [{ text: '', prob: 0, last: -1 }];   /* prob 用对数 */
+  for (let t = 0; t < T; t++) {
+    const fr = frames[t];
+    const next = new Map();
+    const put = (text, last, pr) => {
+      const key = text + '\u0000' + last;
+      const cur = next.get(key);
+      if (!cur || pr > cur.prob) next.set(key, { text, last, prob: pr });
+    };
+    const lb = Math.log(Math.max(1e-9, fr.blank));
+    for (const b of beams) {
+      put(b.text, -1, b.prob + lb);              /* 走 blank：不吐字 */
+      for (const [c, v] of fr.top) {
+        if (c === 0) continue;
+        const ch = chars[c] || '';
+        if (!ch) continue;
+        const lv = Math.log(Math.max(1e-9, v));
+        if (c === b.last) {
+          /* 重复字符：不经过 blank 时 CTC 会折叠掉，概率给个小权重近似 */
+          put(b.text, c, b.prob + lv - 2.3);
+        } else {
+          put(b.text + ch, c, b.prob + lv);
+        }
+      }
+    }
+    beams = [...next.values()].sort((a, b) => b.prob - a.prob).slice(0, BW);
+  }
+  const scored = beams.map((b) => ({ text: toSimp(b.text), prob: b.prob / Math.max(1, T) }));
+  const out = [];
+  const seen = new Set();
+  for (const c of scored) {
+    const t = c.text.trim();
+    if (!t || seen.has(t)) continue;
+    seen.add(t);
+    out.push({ text: t, score: c.prob });
+    if (out.length >= KEEP) break;
+  }
+  return out;
+}
+
+/* 形近的「假英文字母」：西里尔/全角字符经常被模型吐出来，混在英文里就成了乱码。
+   只有在整段没有中文时才做这个归一化。 */
+const CONF_LATIN = {
+  'а': 'a', 'е': 'e', 'о': 'o', 'р': 'p', 'с': 'c', 'х': 'x', 'у': 'y', 'і': 'i', 'ѕ': 's', 'ԁ': 'd',
+  'ɡ': 'g', 'ⅼ': 'l', 'А': 'A', 'В': 'B', 'Е': 'E', 'К': 'K', 'М': 'M', 'Н': 'H', 'О': 'O', 'Р': 'P',
+  'С': 'C', 'Т': 'T', 'Х': 'X', 'У': 'Y', 'Ј': 'J', 'І': 'I',
+};
+
+function fixLatin(s) {
+  let t = String(s || '').replace(/\u3000/g, ' ');
+  let cjk = 0, latin = 0, n = 0;
+  for (const ch of t) {
+    if (!ch.trim()) continue;
+    n++;
+    if (/[\u4e00-\u9fff]/.test(ch)) cjk++;
+    else if (/[A-Za-z0-9]/.test(ch)) latin++;
+  }
+  if (cjk > 0) return t;                       /* 有中文就别动 */
+  if (!n || latin / n < 0.5) return t;
+  let out = '';
+  for (let ch of t) {
+    const code = ch.codePointAt(0);
+    if (code >= 0xFF01 && code <= 0xFF5E) ch = String.fromCharCode(code - 0xFEE0);
+    out += CONF_LATIN[ch] || ch;
+  }
+  return out;
+}
+
+/** 离线识别：返回 { text, score, cands, ms }；cands 是 top-N 候选（第一个就是 text） */
 export async function recognizeLocal(ink) {
   const { ort, sess } = await ensureLocalEngine();
   const src = ink.canvas || ink;
@@ -421,19 +504,45 @@ export async function recognizeLocal(ink) {
   const ms = Math.round(performance.now() - t0);
   const [, T, C] = y.dims;
   const p = y.data;
-  let prev = -1;
-  let s = '';
-  let conf = 0, confN = 0;
+
+  /* 一趟扫描：每帧记下 blank 概率和前 6 个候选字符（贪心和 beam 都用它，别扫两遍） */
+  const frames = new Array(T);
   for (let i = 0; i < T; i++) {
-    let best = 0, bv = -Infinity;
     const base = i * C;
-    for (let c = 0; c < C; c++) { const v = p[base + c]; if (v > bv) { bv = v; best = c; } }
-    if (best !== 0) { conf += bv; confN++; }
-    if (best !== 0 && best !== prev) s += _chars[best] || '';
-    prev = best;
+    const top = [];
+    for (let c = 0; c < C; c++) {
+      const v = p[base + c];
+      if (top.length < 6) { top.push([c, v]); top.sort((a, b) => b[1] - a[1]); }
+      else if (v > top[5][1]) { top[5] = [c, v]; top.sort((a, b) => b[1] - a[1]); }
+    }
+    frames[i] = { blank: p[base], top };
   }
-  /* 置信度（只统计出了字的帧）：低于阈值就别替换墨迹，交给用户决定 */
-  return { text: s.trim(), ms, score: confN ? conf / confN : 0 };
+
+  /* 贪心；置信度按「真正吐出来的每个字」的概率取几何平均（比按帧平均稳得多） */
+  let prev = -1, s = '', logSum = 0, confN = 0;
+  for (let i = 0; i < T; i++) {
+    const best = frames[i].top[0];
+    const c = best ? best[0] : 0;
+    if (c !== 0 && c !== prev) {
+      s += _chars[c] || '';
+      logSum += Math.log(Math.max(1e-6, best[1]));
+      confN++;
+    }
+    prev = c;
+  }
+  const conf = confN ? Math.exp(logSum / confN) : 0;
+  const text = fixLatin(toSimp(s.trim()));
+
+  /* beam 候选（贪心的结果一定在里面，失败就用它兜底） */
+  let cands = [];
+  try {
+    cands = ctcBeam(frames, _chars);
+  } catch (e) { cands = []; }
+  cands = cands.map((c) => ({ ...c, text: fixLatin(c.text) }));
+  if (!cands.length || cands[0].text !== text) {
+    cands = [{ text, score: confN ? conf / confN : 0 }, ...cands.filter((x) => x.text !== text)];
+  }
+  return { text, ms, score: conf, cands: cands.slice(0, 4) };
 }
 
 /* ---------------- AI 引擎 ---------------- */

@@ -4,8 +4,8 @@ import { InkBoard, PAGE_W, PAGE_H, COLORS, SIZES, imageToDataUrl, loadImageFile 
 import { buildNoteJson, parseNoteJson } from './notejson.js';
 import { mdInto } from './md.js';
 import { HwrPad } from './hwrpad.js';
-import { bboxOf, groupLines, looksLikeFormula, recognizeLocal, recognizeFormula, texToImage, inkToCanvas,
-  recognizeStrokes, estimateSize } from './hwr.js';
+import { bboxOf, groupLines, looksLikeFormula, recognizeLocal, recognizeAI, recognizeFormula, texToImage,
+  inkToCanvas, recognizeStrokes, estimateSize } from './hwr.js';
 import { chat, getCfg } from './ai.js';
 
 const LS_LAST = 'kynb_last_note';
@@ -183,6 +183,9 @@ export function initNotebook() {
   let activeTextId = null;      /* 手写转文字往哪个文本框里写 */
   const itBar = $('itBar');     /* 点中元素后浮出的操作条 */
   let barItem = null;
+  const candBar = $('candBar'); /* 识别候选条 */
+  let candTimer = 0;
+  let candFor = null;
   /* 手写转文字的状态（提前声明，避免各种初始化顺序下的 TDZ） */
   let live = null;             /* 正在写的那一行：{ strokes, item, base, size, gen, pt, ct } */
   let lastPara = null;         /* 刚写完的那一块：{ id, t, size }，接着写就往里续 */
@@ -254,6 +257,7 @@ export function initNotebook() {
     $('inkStage').classList.toggle('lassoing', t === 'lasso');
     $('inkStage').classList.toggle('texting', t === 'text');
     if (t !== 'text') { try { finishInlineText(true); } catch (e) { /* 还没定义 */ } }
+    try { hideCandBar(); } catch (e) { /* 还没定义 */ }
     if (t !== 'lasso') { try { clearLasso(); } catch (e) { /* 初始化早期还没定义 */ } }
     if (t !== 'sel') { sel.clear(); try { closeBar(); } catch (e) { /* 同上 */ } renderItems(); }
   }
@@ -1013,7 +1017,7 @@ export function initNotebook() {
     } else {
       const r = await recognizeLocal(ink);
       if (!r.text) { toast('没认出字，笔迹留着没动', true); return false; }
-      if (r.score < 0.45) {
+      if (r.score < 0.2) {
         toast('这段不太确定，先没动它；想硬认就用 ⬚ 圈住后点「转文字」', true);
         return false;
       }
@@ -1021,6 +1025,7 @@ export function initNotebook() {
       if (made) {
         const hint = looksLikeFormula(list) ? '（看着像公式？切到 ∑ 重写一次，或用 ⬚ 圈住点「转公式」）' : '';
         toast(`已转成文字「${r.text.slice(0, 12)}」· 点 ↶ 可退回笔迹${hint}`);
+        showCandBar(made, r.cands, ink.dataUrl);
       }
     }
     if (!made) return false;
@@ -1074,6 +1079,7 @@ export function initNotebook() {
   }
 
   async function previewLine() {
+    if (window.__kynbDebug) window.__hwrDbg = { step: 'enter', live: !!live, busy: busyConv, note: !!st.note };
     if (!live || busyConv || !st.note) return;
     const L = live;
     const strokes = L.strokes.slice();
@@ -1083,9 +1089,13 @@ export function initNotebook() {
     try {
       /* 长行会被自动切段识别，不会再「后半截掉字」 */
       const r = await recognizeStrokes(strokes);
+      if (window.__kynbDebug) window.__hwrDbg = { step: 'recognized', text: r.text, score: r.score, stale: !(live === L && live.gen === gen) };
       if (!live || live !== L || live.gen !== gen) return;   /* 期间又写了新的：这次结果过期 */
-      if (!r.text || r.score < 0.4) return;                  /* 认不准就先不动墨迹 */
+      /* 置信度只挡「完全不像字」的涂鸦；认错了还能点候选 / AI 再看，比不认强 */
+      if (!r.text || r.score < 0.12) return;
       if (!L.size) L.size = estimateSize(strokes) || lastSize;
+      L.cands = r.cands || null;
+      L.inkUrl = r.dataUrl || '';
       if (!L.item) {
         L.item = insertTextFromInk(strokes, r.text, { size: L.size });
       } else {
@@ -1093,6 +1103,7 @@ export function initNotebook() {
         if (L.size) L.item.size = L.size;
         fitItemWidth(L.item);
       }
+      if (window.__kynbDebug) window.__hwrDbg = { step: 'inserted', id: L.item && L.item.id, items: (pageNow() || {}).items ? pageNow().items.length : -1 };
       board.hideStrokes(strokes, true);   /* 这一行的墨迹先藏起来，屏幕上只剩文字 */
       renderItems();
       saveSoon(false);
@@ -1102,6 +1113,7 @@ export function initNotebook() {
       }
     } catch (e) {
       /* 识别失败就当没发生，墨迹还在 */
+      if (window.__kynbDebug) window.__hwrDbg = { step: 'error', msg: String(e && e.message || e), stack: String(e && e.stack || '').slice(0, 300) };
     } finally {
       busyConv = false;
     }
@@ -1130,6 +1142,7 @@ export function initNotebook() {
     renderItems();
     saveSoon(true);
     lastPara = { id: L.item.id, t: Date.now(), size: L.item.size };
+    if (L.cands && L.cands.length > 1) showCandBar(L.item, L.cands, L.inkUrl);
   }
 
   /** 公式模式：AI 慢，不适合每个字刷一遍，写完整段再一次性转 */
@@ -1154,6 +1167,7 @@ export function initNotebook() {
   }
 
   board.onStrokeEnd = (stroke) => {
+    hideCandBar();
     if (hwrMode === 'off' || !st.note || st.mode === 'md') return;
     /* 除了荧光笔和橡皮，各种笔写出来的都参与识别（以前只认 'pen'，换了圆珠笔就不认了） */
     if (stroke.t === 'hl' || stroke.t === 'er') return;
@@ -1329,6 +1343,113 @@ export function initNotebook() {
     $('dlgText').showModal();
     setTimeout(() => $('textInput').focus(), 30);
   }
+
+  /* ---------- 识别候选条：刚认完这一行，给几个「只差一个字」的备选 + AI 复核 ---------- */
+
+  /** 只挑「长度一样、只差一个字、纯中文」的候选——其它多半是形近乱码，给出来反而添乱 */
+  function usefulCands(text, cands) {
+    const t0 = String(text || '');
+    const out = [];
+    if (!/^[\u4e00-\u9fff]+$/.test(t0)) return out;
+    for (const c of (cands || []).slice(1)) {
+      const t = String((c && c.text) || '');
+      if (!t || t === t0 || t.length !== t0.length) continue;
+      if (!/^[\u4e00-\u9fff]+$/.test(t)) continue;
+      let diff = 0;
+      for (let i = 0; i < t.length && diff < 2; i++) if (t[i] !== t0[i]) diff++;
+      if (diff === 1) out.push(t);
+      if (out.length >= 2) break;
+    }
+    return out;
+  }
+
+  function hideCandBar() {
+    clearTimeout(candTimer);
+    candFor = null;
+    if (candBar) candBar.hidden = true;
+  }
+
+  function placeCandBar(it) {
+    if (!candBar || !it) return;
+    const el = itemEl(it.id);
+    if (!el) { hideCandBar(); return; }
+    const r = el.getBoundingClientRect();
+    const bw = candBar.offsetWidth || 260;
+    const bh = candBar.offsetHeight || 36;
+    let top = r.bottom + 8;
+    if (top + bh > window.innerHeight - 8) top = Math.max(8, r.top - bh - 8);
+    let left = r.left + r.width / 2 - bw / 2;
+    left = Math.max(8, Math.min(window.innerWidth - bw - 8, left));
+    candBar.style.left = Math.round(left) + 'px';
+    candBar.style.top = Math.round(top) + 'px';
+  }
+
+  async function aiFix(it, inkUrl) {
+    if (!inkUrl) return;
+    toast('让 AI 再看一遍这一行…');
+    try {
+      const r = await recognizeAI({ dataUrl: inkUrl }, chat);
+      if (r && r.text && r.text !== it.text) {
+        it.text = r.text;
+        fitItemWidth(it);
+        renderItems();
+        saveSoon(true);
+        toast(`AI 改成「${r.text.slice(0, 16)}」`);
+      } else {
+        toast('AI 也觉得原来那样，没改');
+      }
+    } catch (e) {
+      toast('AI 识别失败：' + (e && e.message ? e.message : e), true);
+    }
+    hideCandBar();
+  }
+
+  function showCandBar(it, cands, inkUrl) {
+    if (!candBar || !it) return;
+    const alts = usefulCands(it.text, cands);
+    const vision = !!getCfg().vision;
+    if (!alts.length && !vision) { hideCandBar(); return; }
+    candFor = it;
+    candBar.innerHTML = '';
+    const lbl = document.createElement('span');
+    lbl.className = 'lbl';
+    lbl.textContent = '认成';
+    candBar.appendChild(lbl);
+    for (const t of alts) {
+      const b = document.createElement('button');
+      b.textContent = t;
+      b.title = '用这个';
+      b.onclick = () => {
+        it.text = t;
+        fitItemWidth(it);
+        renderItems();
+        saveSoon(true);
+        hideCandBar();
+        toast('已改成「' + t.slice(0, 16) + '」');
+      };
+      candBar.appendChild(b);
+    }
+    if (vision) {
+      const b = document.createElement('button');
+      b.className = 'ai';
+      b.textContent = 'AI 再看';
+      b.title = '把这一行交给视觉模型重认一次（更准，但要 2~5 秒）';
+      b.onclick = () => aiFix(it, inkUrl);
+      candBar.appendChild(b);
+    }
+    const x = document.createElement('button');
+    x.className = 'close';
+    x.textContent = '✕';
+    x.onclick = () => hideCandBar();
+    candBar.appendChild(x);
+    candBar.hidden = false;
+    placeCandBar(it);
+    clearTimeout(candTimer);
+    candTimer = setTimeout(() => hideCandBar(), 15000);
+  }
+
+  window.addEventListener('resize', () => { if (candFor) placeCandBar(candFor); });
+  stageEl.addEventListener('scroll', () => { if (candFor) placeCandBar(candFor); }, { passive: true });
 
   /* ---------- 打字工具：点一下纸面，就地输入（Enter 结束，Esc 取消） ---------- */
   function startInlineText(e) {
@@ -1719,6 +1840,7 @@ export function initNotebook() {
     activeTextId = null;
     lastPara = null;
     closeBar();
+    try { hideCandBar(); } catch (e) { /* 还没定义 */ }
     hwr.show(false);
     $('inkMd').hidden = true;
     $('inkTools').hidden = false;

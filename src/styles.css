@@ -440,3 +440,15 @@ main{height:calc(100% - 54px)}
   background:rgba(255,255,255,.9);border-radius:4px;padding:0 2px;line-height:1.3;
   font-family:var(--text-font);white-space:pre-wrap;word-break:break-word;cursor:text}
 .stage.texting{cursor:text}
+
+/* ---------- 识别候选条 ---------- */
+.candbar{position:fixed;z-index:61;display:flex;align-items:center;gap:5px;padding:5px 6px;
+  border-radius:10px;background:rgba(28,24,20,.94);box-shadow:0 6px 20px rgba(0,0,0,.26);
+  max-width:min(92vw,640px);overflow-x:auto;touch-action:manipulation}
+.candbar button{border:0;border-radius:7px;padding:5px 9px;font-size:14px;line-height:1.2;
+  cursor:pointer;background:#fff;color:var(--ink);font-family:var(--text-font);white-space:nowrap}
+.candbar button:hover{background:#f3ead9}
+.candbar button.ai{background:#1f4e79;color:#fff}
+.candbar button.ai:hover{background:#173c5e}
+.candbar button.close{background:transparent;color:#d8cbb6;font-size:12px}
+.candbar .lbl{color:#d8cbb6;font-size:11.5px;padding:0 2px}
