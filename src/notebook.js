@@ -30,6 +30,8 @@ export function initNotebook() {
   /* P1-16 / v3.23 双栏：右栏是第二个 InkBoard，board 指向「活动栏」，
      这样工具栏（颜色/线宽/笔/撤销/缩放）不用改就自动作用在活动栏上 */
   let board = boardA;
+  const paperA = $('inkPaper');
+  const cvA = $('inkCv');
   const P = { on: false, act: 0, i2: 1, b2: null, stage2: null, wrap: null };
   const st = { note: null, mode: 'ink', md: '', mdEditing: false, pages: [], idx: 0, tool: 'pen', color: COLORS[0], size: SIZES[1], saveT: 0 };
 
@@ -86,7 +88,7 @@ export function initNotebook() {
 
   board.onChange = () => {
     /* 实时同步回内存里的页对象：导出 JSON / 存笔记 / 缩略图都读它，等 700ms 防抖太晚 */
-    const cur = st.pages[st.idx];
+    const cur = st.pages[curIdx()];
     if (cur) cur.strokes = board.getStrokes();
     saveSoon(false);
   };
@@ -220,7 +222,7 @@ export function initNotebook() {
     return getLayout();
   }
 
-  const pageNow = () => st.pages[st.idx];
+  const pageNow = () => st.pages[curIdx()];
 
   /* ---------- 字体：笔记里的文字跟着「系统字体」走，可以在设置里换 ---------- */
   /* 注意：DOM 的 .tx 和 canvas 导出用的是同一条字体栈（styles.css 里的 --text-font），
@@ -2157,8 +2159,10 @@ export function initNotebook() {
   }
 
   function loadPage1(i) {
+    if (!st.pages.length) return;
     st.idx = Math.max(0, Math.min(st.pages.length - 1, i));
     const p = st.pages[st.idx];
+    if (!p) return;
     if (!Array.isArray(p.items)) p.items = [];
     sel.clear();
     activeTextId = null;      /* 换页了，手写文字重新找个框 */
@@ -2174,6 +2178,23 @@ export function initNotebook() {
   }
 
   function curIdx() { return (P.on && P.act === 1) ? P.i2 : st.idx; }
+
+  /* 双栏：元素层 / 选中层只有一个实例，切栏时把它们搬到活动栏的纸面上，
+     这样「圈选 → 转文字」和插入的图片/文字都作用在用户正在看的那一页。 */
+  function adoptLayers() {
+    const right = P.on && P.act === 1 && P.paper2;
+    const paper = right ? P.paper2 : paperA;
+    const cv = right ? P.cv2 : cvA;
+    if (!paper || !cv) return;
+    if (layerBelow.parentNode !== paper) paper.insertBefore(layerBelow, cv);
+    if (layerAbove.parentNode !== paper) paper.insertBefore(layerAbove, cv.nextSibling);
+    const sl = $('inkSelLayer');
+    if (sl && sl.parentNode !== paper) paper.appendChild(sl);
+    const k = (paper.clientWidth || PAGE_W) / PAGE_W;
+    layerBelow.style.transform = `scale(${k})`;
+    layerAbove.style.transform = `scale(${k})`;
+    if (sl) sl.style.transform = `scale(${k})`;
+  }
   // 双栏：点哪一栏哪一栏就是活动栏
   function onPaneDown(k) {
     if (!P.on) return;
@@ -2184,6 +2205,8 @@ export function initNotebook() {
     board.tool = st.tool;
     board.color = st.color;
     board.size = st.size;
+    adoptLayers();
+    try { renderItems(); } catch (e) { /* 早期还没定义 */ }
     syncInfo();
   }
   function syncInfo() {
@@ -2212,6 +2235,8 @@ export function initNotebook() {
     P.on = true;
     P.wrap = wrap;
     P.b2 = new InkBoard(cv2, paper2, s2);
+    P.paper2 = paper2;
+    P.cv2 = cv2;
     P.b2.tool = st.tool; P.b2.color = st.color; P.b2.size = st.size;
     P.b2.zoom = boardA.zoom;
     P.i2 = (st.idx + 1 < st.pages.length) ? (st.idx + 1)
@@ -2227,6 +2252,7 @@ export function initNotebook() {
       P.bound = true;
     }
     loadPage(P.i2);
+    adoptLayers();
     if (typeof toast === 'function') toast('双栏：左边第 ' + (st.idx + 1) + ' 页，右边第 ' + (P.i2 + 1) + ' 页；点哪栏画哪栏');
   }
   function splitOff() {
@@ -2245,7 +2271,10 @@ export function initNotebook() {
     P.wrap = null;
     board = boardA;
     boardA.stage.classList.remove('pane-act');
-    loadPage(st.idx);
+    /* 顺序要紧：先把元素层/选中层搬回左栏，再切页。
+       切页可能因为没有页而抛错，搬层不能跟着一起跳过（否则图层留在被删掉的 wrap 里，页面就空了）。 */
+    try { adoptLayers(); } catch (e) { /* 搬层失败不影响退出双栏 */ }
+    try { if (st.pages.length) loadPage(st.idx); } catch (e2) { /* 没有页就不切 */ }
   }
   const splitBtn = $('inkSplit');
   if (splitBtn) splitBtn.onclick = () => { if (P.on) splitOff(); else splitOn(); };
