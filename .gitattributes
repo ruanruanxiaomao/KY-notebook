@@ -1,0 +1,10 @@
+# 统一按 LF 存、按 LF 检出：避免 Windows 上编辑器/脚本改一个字节就把整个文件算成改动
+* text=auto eol=lf
+
+# 二进制资源别做行尾转换
+*.apk   binary
+*.png   binary
+*.jpg   binary
+*.wasm  binary
+*.onnx  binary
+*.woff2 binary
