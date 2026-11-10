@@ -544,17 +544,16 @@
       <label class="field" style="flex:1">停笔多久开始识别（毫秒）
         <input id="cfgIdle" type="number" min="200" max="3000" step="50" value="800">
       </label>
-      <label class="field" style="flex:1">停笔多久算写完一行
+      <label class="field" style="flex:1">停笔多久收尾（不影响分段）
         <select id="cfgCommit">
-          <option value="4000">4 秒（写得快）</option>
-          <option value="6000">6 秒</option>
-          <option value="8000">8 秒（推荐）</option>
-          <option value="12000">12 秒（常停下来想）</option>
-          <option value="20000">20 秒（一边想一边写）</option>
+          <option value="4000">4 秒</option>
+          <option value="8000" selected>8 秒（推荐）</option>
+          <option value="15000">15 秒</option>
+          <option value="30000">30 秒</option>
         </select>
       </label>
     </div>
-    <p class="hint" style="margin:0 0 6px">左边：抬笔后多久开始认字。写一个字的笔画之间常要停一下，这个值太小会把半个字先认上去（默认 800ms，跟 Windows 手写一致；写得慢就调到 1200）。右边：停笔多久算这一行写完，太快会把一个字拆成好几块。</p>
+    <p class="hint" style="margin:0 0 6px">分段<strong>不用等任何时间</strong>：换行写、或者<b>在空白处轻点一下</b>，这一段立刻结束，下一笔就是新的一段。同一行接着写就是同一段（跟纸上一样）。左边控制多久开始认字（太小会把半个字先认上去，默认 800ms）；右边只控制墨迹多久收干净，写字慢就调长。</p>
     <label class="check" style="margin-top:2px"><input type="checkbox" id="cfgHud"> 显示笔迹延迟面板</label>
     <div class="row">
       <button class="btn ghost mini" type="button" id="cfgOpenPad" title="在手写板上写，认出来写进当前页的文本框">打开底部手写板</button>

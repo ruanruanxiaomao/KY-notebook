@@ -1178,6 +1178,7 @@ export function initNotebook() {
   let busyConv = false;
   let hinted = false;                  // 「手指点一下能删」的提示只弹一次
   let resumeHinted = false;            // 「这几笔没认出来」的提示只弹一次
+  let tapHinted = false;               // 「轻点分段」的提示只弹一次
 
   try { hwrMode = localStorage.getItem(HWR_MODE_KEY) || 'off'; } catch (e) { hwrMode = 'off'; }
   if (hwrMode !== 'text' && hwrMode !== 'formula') hwrMode = 'off';
@@ -1185,6 +1186,8 @@ export function initNotebook() {
   function paintHwrBtns() {
     $('inkHwrText').classList.toggle('on', hwrMode === 'text');
     $('inkHwrTex').classList.toggle('on', hwrMode === 'formula');
+    /* 轻点分段只在 ✍ 模式下生效：普通画笔点一下还是要点一个点 */
+    board.tapToEnd = hwrMode === 'text';
   }
   paintHwrBtns();
 
@@ -1192,7 +1195,7 @@ export function initNotebook() {
     hwrMode = hwrMode === m ? 'off' : m;
     try { localStorage.setItem(HWR_MODE_KEY, hwrMode); } catch (e) { /* 无痕 */ }
     paintHwrBtns();
-    try { commitLine(true); } catch (e) { /* 还没定义 */ }
+    try { commitLine(true, true); } catch (e) { /* 还没定义 */ }
     pendingTex.clear();
     clearTimeout(texTimer);
     if (hwrMode === 'text') toast('边写边认已开：写完一个字就变成文字，停一下把整行定稿');
@@ -1364,7 +1367,7 @@ export function initNotebook() {
     try { return Math.max(200, Math.min(2000, getHwrCfg().idle || 800)); } catch (e) { return 800; }
   }
   function hwrCommitMs() {
-    try { return Math.max(3000, Math.min(20000, getHwrCfg().commit || 8000)); } catch (e) { return 8000; }
+    try { return Math.max(1200, Math.min(20000, getHwrCfg().commit || 3000)); } catch (e) { return 3000; }
   }
 
   function startSession(stroke) {
@@ -1462,7 +1465,7 @@ export function initNotebook() {
     L.ct = setTimeout(() => {
       if (live !== L) return;
       if (busyConv || L.need) { scheduleCommit(L); return; }
-      commitLine();
+      commitLine(false, false);   /* 时间到只是收尾，不封段 */
     }, hwrCommitMs());
   }
 
@@ -1538,8 +1541,10 @@ export function initNotebook() {
   }
 
   /** 这一行定稿：**只删已经变成文字的墨迹**，文字留下（撤销只会退掉这一次转换）
-      final=true：换页 / 关模式时用 —— 没进文字的笔画留在原处，不要在新页接着认 */
-  function commitLine(final) {
+      final=true：换页 / 关模式时用 —— 没进文字的笔画留在原处，不要在新页接着认
+      close=true：真的「这一段结束了」（换行 / 轻点 / 切页）。时间到只是收尾，
+      不封段 —— 否则写字慢的人（笔画之间停几秒）会被拆成一块块。 */
+  function commitLine(final, close) {
     const L = live;
     if (!L) return;
     clearTimeout(L.pt);
@@ -1567,9 +1572,9 @@ export function initNotebook() {
     if (done.length) board.removeStrokes(done);
     renderItems();
     saveSoon(true);
-    /* closed：这一块已经定稿，下一次落笔要另起一块（见 startSession）。
+    /* closed：这一段真的结束了，下一次落笔另起一块（见 startSession）。
        还有没认出来的墨迹（rest）时先不封，等它们续认完再封。 */
-    if (L.item) lastPara = { id: L.item.id, t: Date.now(), size: L.item.size, closed: !rest.length };
+    if (L.item) lastPara = { id: L.item.id, t: Date.now(), size: L.item.size, closed: !!close && !rest.length };
     if (L.item && L.cands && L.cands.length > 1) showCandBar(L.item, L.cands, L.inkUrl);
     /* 剩下的墨迹别变成「死墨迹」：开新一轮接着认（同一次识别失败最多重试 3 轮） */
     if (rest.length && !final && hwrMode === 'text') resumeWith(rest, L);
@@ -1636,6 +1641,24 @@ export function initNotebook() {
     if (live) clearTimeout(live.pt);
   };
 
+  /* 轻点空白处 = 这一段写完了：立刻认一次、定稿，接着写就是新的一段。
+     这样就不用「等停笔多久」——分段由用户说了算，想接着同一段写就别点。 */
+  board.onTap = async () => {
+    if (hwrMode !== 'text' || !live || !st.note) return;
+    const L = live;
+    clearTimeout(L.pt);
+    clearTimeout(L.ct);
+    await previewLine(L);
+    /* 引擎还在跑就等它跑完（最多 1 秒），别拿旧的识别结果收尾 */
+    for (let i = 0; i < 20 && busyConv; i++) await new Promise((r) => setTimeout(r, 50));
+    if (live !== L) return;
+    commitLine(true, true);   /* 轻点 = 这一段写完了 */
+    if (L.item && !tapHinted) {
+      tapHinted = true;
+      toast('这一段结束了，接着写就是新的一段；想继续同一段就别点，直接写');
+    }
+  };
+
   board.onStrokeEnd = (stroke) => {
     hideCandBar();
     if (hwrMode === 'off' || !st.note || st.mode === 'md') return;
@@ -1649,7 +1672,7 @@ export function initNotebook() {
       return;
     }
 
-    if (breaksLine(stroke)) commitLine();
+    if (breaksLine(stroke)) commitLine(false, true);   /* 换行 = 新的一段 */
     if (!live) live = startSession(stroke);
     const L = live;
     L.strokes.push(stroke);
@@ -2203,7 +2226,7 @@ export function initNotebook() {
     if (!Array.isArray(p.items)) p.items = [];
     sel.clear();
     activeTextId = null;      /* 换页了，手写文字重新找个框 */
-    try { commitLine(true); } catch (e) { /* 初始化早期还没定义 */ }
+    try { commitLine(true, true); } catch (e) { /* 初始化早期还没定义 */ }
     lastPara = null;
     pendingTex.clear();
     clearTimeout(texTimer);

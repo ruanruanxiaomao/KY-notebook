@@ -47,6 +47,8 @@ export class InkBoard {
     this.onChange = null;
     this.onStrokeEnd = null;         /* 抬笔后回调：画布自动转文字要用 */
     this.onStrokeStart = null;       /* 落笔回调：正在等的「开始识别」定时器要先停掉（新笔画=还在写同一个字） */
+    this.onTap = null;               /* 轻点（几乎没移动的一下）：不是写字，是「这一段写完了」 */
+    this.tapToEnd = false;           /* 只有「边写边认」模式下才把轻点当分段，普通画笔点一下就是点 */
     this.onItemsChanged = null;      /* 撤销恢复了元素：交给上层重画 DOM */
     this.hud = null;                 /* 调试用的延迟面板 */
     this._lag = { n: 0, sum: 0, max: 0 };
@@ -411,7 +413,7 @@ export class InkBoard {
       if (this.onStrokeStart) this.onStrokeStart();
       try { cv.setPointerCapture(e.pointerId); } catch (err) { /* 合成事件会抛，忽略 */ }
       const t = this.tool;
-      const st = { t, c: this.color, w: this.size, pts: [], seed: (Math.random() * 997) | 0 };
+      const st = { t, c: this.color, w: this.size, pts: [], seed: (Math.random() * 997) | 0, t0: Date.now() };
       this._st = st;
       this._pid = e.pointerId;
       this._pred = null;
@@ -490,6 +492,28 @@ export class InkBoard {
         }
       }
       if (st.pts.length < 4) st.pts.push(st.pts[0], st.pts[1], st.pts[2] || 0.5);
+
+      /* 轻点一下（包围盒不到 7px、按下去不到 300ms）= 不是写字，是「这一段写完了」。
+         用户不用等定稿时间：点一下空白处就立刻结束这一段，接着写算新的一段。
+         用包围盒而不是首尾距离判断——句号是画个圈，首尾几乎重合，但它是字，不是轻点。 */
+      let bx0 = Infinity, by0 = Infinity, bx1 = -Infinity, by1 = -Infinity;
+      for (let i = 0; i + 1 < st.pts.length; i += 3) {
+        const x = st.pts[i], y = st.pts[i + 1];
+        if (x < bx0) bx0 = x;
+        if (x > bx1) bx1 = x;
+        if (y < by0) by0 = y;
+        if (y > by1) by1 = y;
+      }
+      const tapSize = Math.max(bx1 - bx0, by1 - by0);
+      if (this.tapToEnd && this.onTap && tapSize < 7 && Date.now() - st.t0 < 300) {
+        const i = this.strokes.indexOf(st);
+        if (i >= 0) this.strokes.splice(i, 1);   /* 这一下不算笔画，撤掉 */
+        this.redraw();
+        if (this.onChange) this.onChange();
+        this.onTap();
+        this._rect = null;
+        return;
+      }
 
       this._commit(st);          /* 这一笔盖进离屏，其它笔画不用重画 */
       this.drawLive();

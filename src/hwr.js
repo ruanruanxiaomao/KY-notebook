@@ -18,9 +18,10 @@ export function getHwrCfg() {
     auto: c.auto !== false,              // 自动上屏：认出来直接写进笔记
     engine: c.engine === 'ai' ? 'ai' : 'local',
     idle: Math.max(200, Math.min(3000, Number(c.idle) || 800)),   // 停笔多久开始识别
-    /* 停笔多久算「这一行写完了」：写一个字常常要在笔画之间停 2~5 秒，
-       定稿太快会把一个字拆成好几块（以前 2.4 秒就是这么坏事的） */
-    commit: Math.max(3000, Math.min(20000, Number(c.commit) || 8000)),
+    /* 停笔多久「收尾」：只是把已经变成文字的墨迹清掉，**不决定分段**。
+       分段靠换行 / 轻点空白处（立刻生效，不用等）。所以这个值给长一点没关系，
+       写字慢（笔画之间停几秒）也不会被拆字。 */
+    commit: Math.max(2000, Math.min(30000, Number(c.commit) || 8000)),
   };
 }
 
@@ -29,7 +30,7 @@ export function setHwrCfg(c) {
     auto: c.auto !== false,
     engine: c.engine === 'ai' ? 'ai' : 'local',
     idle: Math.max(200, Math.min(3000, Number(c.idle) || 800)),
-    commit: Math.max(3000, Math.min(20000, Number(c.commit) || 8000)),
+    commit: Math.max(2000, Math.min(30000, Number(c.commit) || 8000)),
   }));
 }
 
