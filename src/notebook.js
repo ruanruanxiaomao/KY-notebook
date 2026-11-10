@@ -1270,6 +1270,15 @@ export function initNotebook() {
       it.y = Math.max(4, y);
       it.para = a.para || a.id;   /* 同一段：方便「整理本页」按段排 */
     }
+    /* 定稿后在同一行接着写：另起一块，但基线跟上一块齐、排在它右边，
+       既不覆盖上一块，也不会因为手写差几个像素显得歪 */
+    const sl = o.sameLine;
+    if (sl && sl.type === 'text' && p.items.indexOf(sl) >= 0) {
+      const slSize = itemSize(sl);
+      const slW = textMetricsOf(sl).w;
+      it.y = Math.max(4, Math.round(sl.y + (slSize - size) * 0.15));
+      it.x = Math.max(4, Math.round(Math.max(it.x, sl.x + slW + size * 0.12)));
+    }
     p.items.push(it);
     return it;
   }
@@ -1366,15 +1375,21 @@ export function initNotebook() {
     const prev = lastPara ? p.items.find((x) => x.id === lastPara.id && x.type === 'text') : null;
     if (!prev || Date.now() - lastPara.t > 45000) return base;
     const size = prev.size || 32;
+    /* 上一块已经定稿 = 上一次书写结束了。这时候再落笔是**新的一次输入**，
+       不能再并进上一块继续累积（否则写完三个字、停一会儿再写一个字，
+       会变成四个字挤在同一块里）。连续书写时不会定稿，所以不受影响。 */
+    const closed = !!lastPara.closed;
     const cy = bb.y + bb.h / 2;
     const endX = prev.x + measureW(prev.text, size);
     const gap = bb.x - endX;
-    /* ⓪ 标点（一小笔）一律并进上一块：单独一块模型认不出来，并进去才能整行重认 / 按形状兜底 */
+    /* ⓪ 标点（一小笔）一律并进上一块：单独一块模型认不出来，并进去才能整行重认 / 按形状兜底。
+       标点本来就是挂在上一句尾巴上的，定稿后补一个句号也该并进去。 */
     if (isPunctLike([stroke], size)) {
       return { ...base, item: prev, base: String(prev.text || ''), size };
     }
-    /* ① 同一行、接着上一块的尾巴写 → 续写（字号、位置都不动） */
-    if (cy > prev.y + size * 0.15 && cy < prev.y + size * 1.55 && gap > -size * 2.2 && gap < size * 1.8) {
+    /* ① 同一行、接着上一块的尾巴写 → 续写（字号、位置都不动）。
+       只在「这一行还没定稿」时成立。 */
+    if (!closed && cy > prev.y + size * 0.15 && cy < prev.y + size * 1.55 && gap > -size * 2.2 && gap < size * 1.8) {
       return { ...base, item: prev, base: String(prev.text || ''), size };
     }
     /* ② 下一行 → 另起一块，但锚到上一块：左边界对齐、行距统一（默认就排整齐） */
@@ -1383,15 +1398,21 @@ export function initNotebook() {
     if (bb.y > prev.y + aSize * 0.8 && bb.y - (prev.y + step) < aSize * 3.2) {
       return { ...base, size, anchor: prev };
     }
-    /* ③ 同一行但离得远（比如右边另起一个标题）→ 沿用字号，位置保留 */
+    /* ③ 同一行（定稿后接着写也走这里）→ 另起一块，但基线跟上一块对齐、排在它右边，
+       不覆盖、也不挤进上一块的文字里 */
     if (cy > prev.y - aSize * 0.9 && cy < prev.y + aSize * 1.6) {
-      return { ...base, size };
+      return { ...base, size, sameLine: prev };
     }
     return base;
   }
 
   function breaksLine(stroke) {
     if (!live || !live.strokes.length) return false;
+    /* 这一行还没成形（没有文字块、只写了一两笔）就别判断换行：
+       单笔的 bbox 只有几像素高，算出来的行高/字号全是错的，
+       第二笔稍微靠下就会被当成「下一行」——一个字直接被拆成两块。
+       真要是另起一行，上一行早就定稿了（live 为空），轮不到这里判断。 */
+    if (!live.item && live.strokes.length < 3) return false;
     const b = bboxOf([stroke]);
     const all = bboxOf(live.strokes);
     if (!b || !all) return false;
@@ -1546,13 +1567,17 @@ export function initNotebook() {
     if (done.length) board.removeStrokes(done);
     renderItems();
     saveSoon(true);
-    if (L.item) lastPara = { id: L.item.id, t: Date.now(), size: L.item.size };
+    /* closed：这一块已经定稿，下一次落笔要另起一块（见 startSession）。
+       还有没认出来的墨迹（rest）时先不封，等它们续认完再封。 */
+    if (L.item) lastPara = { id: L.item.id, t: Date.now(), size: L.item.size, closed: !rest.length };
     if (L.item && L.cands && L.cands.length > 1) showCandBar(L.item, L.cands, L.inkUrl);
     /* 剩下的墨迹别变成「死墨迹」：开新一轮接着认（同一次识别失败最多重试 3 轮） */
     if (rest.length && !final && hwrMode === 'text') resumeWith(rest, L);
   }
 
-  /** 定稿后还有没进文字的笔画：接着往同一块里续认 */
+  /** 定稿后还有没进文字的笔画：接着往同一块里续认
+      （注意别用 startSession：那一块已经定稿了，startSession 会另起新块，
+       同一个字就被拆成两块了） */
   function resumeWith(list, from) {
     if (!list.length) return;
     const tries = (from && from.tries) || 0;
@@ -1563,8 +1588,20 @@ export function initNotebook() {
       }
       return;
     }
-    const L = live || startSession(list[0]);
-    if (!L) return;
+    let L = live;
+    if (!L) {
+      L = {
+        strokes: [], item: (from && from.item) || null,
+        /* base 用「这块现在的文字」：rest 只是没认出来的那几笔，
+           重认完应该追加到已有文字后面，不能把整块覆盖掉 */
+        base: from && from.item ? String(from.item.text || '') : '',
+        size: (from && from.size) || 0, gen: 0, pt: 0, ct: 0, need: false, tries: 0,
+        anchor: (from && from.anchor) || null,
+      };
+      /* 必须挂回 live：不挂的话这个会话是孤儿，预览/定稿的定时器都认不出它，
+         那几笔就永远停在画布上（「写完定稿后多出一笔」就是这么来的） */
+      live = L;
+    }
     L.tries = tries + 1;
     for (const s of list) if (L.strokes.indexOf(s) < 0) L.strokes.push(s);
     L.gen++;
