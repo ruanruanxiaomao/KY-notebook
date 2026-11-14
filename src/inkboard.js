@@ -44,6 +44,10 @@ export class InkBoard {
     this._rawAt = 0;     // 最近一次 pointerrawupdate 的时间戳，用来避免和 pointermove 重复
     this._k = 1;      // 页面坐标 → 设备像素
     this._s = 1;      // 页面坐标 → CSS 像素
+    /* Android WebView 的 getPredictedEvents() 给的点常比真实笔尖提前很多，
+       视觉上就是「笔迹飘到笔尖前面」；而这些点本来就不进最终笔画，
+       关掉它只有好处，不影响精度 */
+    this._noPredict = /Android/i.test(navigator.userAgent);
     this.onChange = null;
     this.onStrokeEnd = null;         /* 抬笔后回调：画布自动转文字要用 */
     this.onStrokeStart = null;       /* 落笔回调：正在等的「开始识别」定时器要先停掉（新笔画=还在写同一个字） */
@@ -381,6 +385,9 @@ export class InkBoard {
     const x = (e.clientX - r.left) / s;
     const y = (e.clientY - r.top) / s;
     const p = typeof e.pressure === 'number' && e.pressure > 0 ? e.pressure : 0.5;
+    /* 调试面板用：把「系统给的坐标」和「换算后的坐标」都记下来，
+       一旦有固定偏移，这里能直接看出差多少（client 与 rect+page*s 应该相等） */
+    if (this.hud) this._lastPt = { cx: e.clientX, cy: e.clientY, x, y, left: r.left, top: r.top, s, w: r.width };
     return [x, y, p];
   }
 
@@ -458,8 +465,9 @@ export class InkBoard {
         added = true;
       }
 
-      /* 预测点：只画不存，用来补「笔已经走到、画面还没跟上」的那一两帧 */
-      if (typeof e.getPredictedEvents === 'function') {
+      /* 预测点：只画不存，用来补「笔已经走到、画面还没跟上」的那一两帧。
+         移动端不用（见 _noPredict 的注释）：预测点跑在真实笔迹前面，看起来像飘 */
+      if (!this._noPredict && typeof e.getPredictedEvents === 'function') {
         try {
           const pr = e.getPredictedEvents();
           this._pred = pr && pr.length ? pr.map((ev) => this._pt(ev)) : null;
@@ -597,9 +605,24 @@ export class InkBoard {
     const avg = l.n ? (l.sum / l.n) : 0;
     const pts = Math.floor(st.pts.length / 3);
     this.hud.innerHTML = `输入延迟 平均 <b>${avg.toFixed(1)}</b>ms / 峰值 ${l.max.toFixed(0)}ms<br>`
-      + `本笔 ${pts} 点 · 绘制 ${(this._frameMs || 0).toFixed(1)}ms · ${this._fps.v || 0}fps`;
+      + `本笔 ${pts} 点 · 绘制 ${(this._frameMs || 0).toFixed(1)}ms · ${this._fps.v || 0}fps`
+      + this._coordLine();
     l.n = 0; l.sum = 0; l.max = 0;
     if (st.t === 'er') return;
+  }
+
+  /** 坐标自检：系统给的 client 坐标 与 换算回来的坐标 差多少（正常应该几乎为 0） */
+  _coordLine() {
+    const q = this._lastPt;
+    if (!q) return '';
+    const bx = q.left + q.x * q.s;
+    const by = q.top + q.y * q.s;
+    const d = Math.hypot(q.cx - bx, q.cy - by);
+    const bad = d > 1.5;
+    return `<br>落笔 client(${q.cx.toFixed(0)},${q.cy.toFixed(0)}) → 页(${q.x.toFixed(0)},${q.y.toFixed(0)})`
+      + `<br>换算回屏(${bx.toFixed(0)},${by.toFixed(0)}) `
+      + `<b style="color:${bad ? '#c0392b' : '#2e7d32'}">偏差 ${d.toFixed(1)}px</b>`
+      + ` · 比例 ${q.s.toFixed(3)}`;
   }
 
   eraseAt(e) {

@@ -2143,6 +2143,9 @@ export function initNotebook() {
     if (st.mode === 'md') {
       st.note.title = titleEl.value.trim() || '未命名笔记';
       st.note.md = st.md || '';
+      /* 手写批注跟着文字笔记一起存 */
+      st.note.mdInk = mdInk.serialize();
+      st.note.mdInkOn = mdInk.on;
       st.note.pageCount = 1;
       st.note.updatedAt = Date.now();
       await store.putNote({ ...st.note });
@@ -2364,17 +2367,245 @@ export function initNotebook() {
   }
 
   /* ---------- 文字笔记（markdown） ---------- */
+  /* 文档上的手写批注层。
+     文档是流式排版（高度随内容变），所以笔迹存「文档坐标」；
+     canvas 只盖住可视区域，滚动时跟着走，重绘时整体上移 scrollTop。
+     只认笔（pointerType==='pen'），手指不拦 —— 这样一只手写、一只手滑动翻页。 */
+  class MdInk {
+    constructor(body, cv) {
+      this.body = body;
+      this.cv = cv;
+      this.ctx = cv.getContext('2d');
+      this.strokes = [];
+      this.undoStack = [];
+      this.tool = 'pen';                 /* 'pen' | 'er' */
+      this.color = '#c0392b';            /* 批注默认红笔，跟正文区分 */
+      this.size = 2.2;
+      this.on = false;
+      this._st = null;
+      this.onChange = null;
+      this.bind();
+      try { new ResizeObserver(() => this.draw()).observe(body); } catch (e) { /* 老内核 */ }
+    }
+
+    /* 视口坐标 → 文档坐标（canvas 的 top 一直跟着 scrollTop） */
+    _pt(e) {
+      const r = this.cv.getBoundingClientRect();
+      return [e.clientX - r.left, e.clientY - r.top + this.body.scrollTop];
+    }
+
+    load(data) {
+      const list = data && Array.isArray(data.strokes) ? data.strokes : [];
+      this.strokes = list.filter((s) => s && Array.isArray(s.pts) && s.pts.length >= 2);
+      this.undoStack.length = 0;
+      this.draw();
+    }
+
+    serialize() { return { v: 1, strokes: this.strokes }; }
+
+    setOn(on) {
+      this.on = !!on;
+      const stage = this.body.closest('.md-stage') || this.body;
+      stage.classList.toggle('pen', this.on);
+      this.draw();
+    }
+
+    setTool(t) { this.tool = t; }
+
+    undo() {
+      if (!this.undoStack.length) return false;
+      this.strokes = this.undoStack.pop();
+      this.draw();
+      this._changed();
+      return true;
+    }
+
+    clear() {
+      if (!this.strokes.length) return false;
+      this.undoStack.push(this.strokes.slice());
+      this.strokes = [];
+      this.draw();
+      this._changed();
+      return true;
+    }
+
+    _changed() { if (this.onChange) this.onChange(); }
+
+    _paint(s) {
+      const ctx = this.ctx;
+      const pts = s.pts;
+      const n = Math.floor(pts.length / 3);
+      if (!n) return;
+      ctx.strokeStyle = s.c || '#c0392b';
+      ctx.fillStyle = ctx.strokeStyle;
+      ctx.lineWidth = Math.max(0.6, s.w || 2);
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+      if (n === 1 || (n === 2 && Math.hypot(pts[3] - pts[0], pts[4] - pts[1]) < 1)) {
+        ctx.beginPath();
+        ctx.arc(pts[0], pts[1], ctx.lineWidth / 2, 0, Math.PI * 2);
+        ctx.fill();
+        return;
+      }
+      ctx.beginPath();
+      ctx.moveTo(pts[0], pts[1]);
+      if (n === 2) {
+        ctx.lineTo(pts[3], pts[4]);
+      } else {
+        /* 二次曲线 + 中点平滑，跟画板一个口径 */
+        for (let i = 3; i + 3 < pts.length; i += 3) {
+          const xc = (pts[i] + pts[i + 3]) / 2;
+          const yc = (pts[i + 1] + pts[i + 4]) / 2;
+          ctx.quadraticCurveTo(pts[i], pts[i + 1], xc, yc);
+        }
+        ctx.lineTo(pts[pts.length - 3], pts[pts.length - 2]);
+      }
+      ctx.stroke();
+    }
+
+    draw() {
+      const dpr = window.devicePixelRatio || 1;
+      const w = Math.max(1, this.body.clientWidth);
+      const h = Math.max(1, this.body.clientHeight);
+      if (this.cv.width !== Math.round(w * dpr) || this.cv.height !== Math.round(h * dpr)) {
+        this.cv.width = Math.round(w * dpr);
+        this.cv.height = Math.round(h * dpr);
+      }
+      const ctx = this.ctx;
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.clearRect(0, 0, this.cv.width, this.cv.height);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, -this.body.scrollTop * dpr);
+      for (const s of this.strokes) this._paint(s);
+      if (this._st) this._paint(this._st);
+    }
+
+    /** 点到线段的距离：橡皮按「整笔删除」处理（跟画板一致） */
+    _hit(s, x, y, tol) {
+      const pts = s.pts;
+      for (let i = 0; i + 4 < pts.length; i += 3) {
+        const x1 = pts[i], y1 = pts[i + 1], x2 = pts[i + 3], y2 = pts[i + 4];
+        const dx = x2 - x1, dy = y2 - y1;
+        const L2 = dx * dx + dy * dy;
+        let t = L2 ? ((x - x1) * dx + (y - y1) * dy) / L2 : 0;
+        t = Math.max(0, Math.min(1, t));
+        if (Math.hypot(x - (x1 + t * dx), y - (y1 + t * dy)) < tol) return true;
+      }
+      return false;
+    }
+
+    bind() {
+      const cv = this.cv;
+      const down = (e) => {
+        if (!this.on) return;
+        if (e.pointerType !== 'pen') return;      /* 手指让给滚动 */
+        if (this._st) return;
+        e.preventDefault();
+        try { cv.setPointerCapture(e.pointerId); } catch (err) { /* 合成事件会抛 */ }
+        const [x, y] = this._pt(e);
+        this._st = { t: this.tool, c: this.color, w: this.size, pts: [x, y, 0.5], pid: e.pointerId };
+        this.draw();
+      };
+      const move = (e) => {
+        if (!this._st || e.pointerId !== this._st.pid) return;
+        e.preventDefault();
+        const [x, y] = this._pt(e);
+        const p = this._st.pts;
+        if (Math.hypot(x - p[p.length - 3], y - p[p.length - 2]) < 0.8) return;
+        p.push(x, y, typeof e.pressure === 'number' && e.pressure > 0 ? e.pressure : 0.5);
+        this.draw();
+      };
+      const up = (e) => {
+        if (!this._st || e.pointerId !== this._st.pid) return;
+        const s = this._st;
+        this._st = null;
+        if (this.tool === 'er') {
+          const before = this.strokes.length;
+          const kept = this.strokes.filter((q) => !this._hit(q, s.pts[0], s.pts[1], Math.max(8, this.size * 3)));
+          if (kept.length !== before) {
+            this.undoStack.push(this.strokes.slice());
+            this.strokes = kept;
+            this._changed();
+          }
+        } else {
+          this.undoStack.push(this.strokes.slice());
+          this.strokes.push(s);
+          this._changed();
+        }
+        this.draw();
+      };
+      cv.addEventListener('pointerdown', down);
+      cv.addEventListener('pointermove', move);
+      cv.addEventListener('pointerup', up);
+      cv.addEventListener('pointercancel', up);
+      /* canvas 放在滚动容器外面（不跟着内容滚），滚动只触发重绘 */
+      this.body.addEventListener('scroll', () => this.draw(), { passive: true });
+    }
+  }
+
+  const mdInk = new MdInk($('mdBody'), $('mdInk'));
+  mdInk.onChange = () => {
+    if (st.note) { st.note.mdInk = mdInk.serialize(); saveSoon(false); }
+  };
+
+  function paintMdPenBtn() {
+    $('inkMdPen').classList.toggle('on', mdInk.on);
+  }
+  $('inkMdPen').onclick = () => {
+    mdInk.setOn(!mdInk.on);
+    paintMdPenBtn();
+    if (!mdInk.on) toast('批注已关：现在手指可以选中文字、复制');
+  };
+  $('inkMdErase').onclick = () => {
+    const er = mdInk.tool !== 'er';
+    mdInk.setTool(er ? 'er' : 'pen');
+    $('inkMdErase').classList.toggle('on', er);
+    toast(er ? '橡皮：点一下要删的那一笔' : '回到红笔');
+  };
+  $('inkMdUndo').onclick = () => { if (!mdInk.undo()) toast('没有可撤销的笔迹'); };
+  $('inkMdClear').onclick = () => {
+    if (!mdInk.strokes.length) { toast('这一篇还没有手写笔迹'); return; }
+    if (!confirm('清空这一篇上的手写笔迹？文字不受影响。')) return;
+    mdInk.clear();
+  };
+
+  /* 导入 .md / .txt：进来就是「排好版的文档 + 可以手写」的状态，
+     不是丢进一个源码框里让用户自己对着改 */
+  $('inkImportMd').onclick = () => { $('inkImportMdFile').value = ''; $('inkImportMdFile').click(); };
+  $('inkImportMdFile').onchange = async () => {
+    const f = $('inkImportMdFile').files && $('inkImportMdFile').files[0];
+    if (!f) return;
+    try {
+      const text = await f.text();
+      const title = f.name.replace(/\.[^.]+$/, '') || '导入的文档';
+      await addMdNote(title, text);
+      toast(`已导入「${title}」：文档保持排版，直接用笔在上面写就行`);
+    } catch (e) {
+      toast('导入失败：' + (e && e.message ? e.message : e), true);
+    }
+  };
+
+
   function setMdEditing(on) {
     st.mdEditing = !!on;
     $('inkMdSrc').hidden = !on;
-    $('inkMdView').hidden = !!on;
     $('inkMdEdit').hidden = !!on;
     $('inkMdSave').hidden = !on;
     $('inkMdCancel').hidden = !on;
     $('inkMdInfo').hidden = !!on;
+    /* 编辑时**不丢掉渲染**：上面继续显示排好版的文档，下面才是源码。
+       以前一进编辑就把渲染视图 hidden，看起来像「文档没了」，很难对着改 */
+    $('inkMd').classList.toggle('editing', !!on);
     if (on) {
+      mdInk.setOn(false);
+      paintMdPenBtn();
       $('inkMdSrc').value = st.md;
+      $('inkMdSrc').scrollTop = 0;
+      $('inkMdSrc').setSelectionRange(0, 0);
       $('inkMdSrc').focus();
+    } else {
+      mdInk.setOn(st.mdInkOn !== false);
+      paintMdPenBtn();
+      mdInk.draw();
     }
   }
 
@@ -2398,7 +2629,12 @@ export function initNotebook() {
     $('inkExportPng').hidden = true;
     pageInfo.textContent = '文字笔记';
     setMdEditing(false);
-    mdInto($('inkMdView'), st.md);
+    st.mdInkOn = n.mdInkOn !== false;
+    mdInk.load(n.mdInk || null);
+    mdInk.setOn(st.mdInkOn);
+    paintMdPenBtn();
+    await mdInto($('inkMdView'), st.md);
+    mdInk.draw();
     $('inkMdInfo').textContent = `${(st.md || '').length} 字`;
     renderSrc(n.src || null);
   }

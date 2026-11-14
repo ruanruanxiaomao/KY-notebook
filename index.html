@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
 <title>KY-notebook · 手写笔记 / 拍题 / 批注</title>
 <link rel="stylesheet" href="src/styles.css">
 <script>
@@ -39,11 +39,13 @@
         <strong>我的笔记</strong>
         <div class="lib-actions">
           <button class="btn mini" id="inkNewGroup" title="新建一个分组，把笔记归类">＋ 分组</button>
+          <button class="btn mini" id="inkImportMd" title="导入 .md / .txt，作为可手写批注的文字笔记">导入 MD</button>
           <button class="btn mini" id="inkImportJson" title="从导出的 JSON 文件新建一本笔记">导入 JSON</button>
           <button class="btn mini" id="inkNew">＋ 新建</button>
         </div>
       </div>
       <input type="file" id="inkImportFile" accept="application/json,.json" hidden>
+      <input type="file" id="inkImportMdFile" accept=".md,.markdown,.txt,text/markdown,text/plain" hidden>
       <div class="lib-grid" id="inkLib"></div>
       <div class="lib-empty" id="inkEmpty">还没有笔记，点「＋ 新建」开始。</div>
     </aside>
@@ -194,12 +196,21 @@
       <div class="md-wrap" id="inkMd" hidden>
         <div class="md-bar">
           <button class="btn mini" id="inkMdEdit">编辑</button>
+          <button class="btn mini on" id="inkMdPen" title="用笔在文档上写字（手指仍然滑动翻页）">✍ 批注</button>
+          <button class="btn mini" id="inkMdErase" title="橡皮：点一下删掉那一笔">橡皮</button>
+          <button class="btn mini" id="inkMdUndo" title="撤销上一笔">撤销</button>
+          <button class="btn mini danger" id="inkMdClear" title="清空这一篇上的手写笔迹">清空笔迹</button>
           <span class="hint" id="inkMdInfo"></span>
           <span class="spacer"></span>
           <button class="btn mini" id="inkMdSave" hidden>保存</button>
           <button class="btn mini danger" id="inkMdCancel" hidden>取消</button>
         </div>
-        <div class="out md-view" id="inkMdView"></div>
+        <div class="md-stage" id="mdStage">
+          <div class="md-body" id="mdBody">
+            <div class="out md-view" id="inkMdView"></div>
+          </div>
+          <canvas id="mdInk"></canvas>
+        </div>
         <textarea class="md-src" id="inkMdSrc" hidden spellcheck="false"></textarea>
       </div>
     </section>
