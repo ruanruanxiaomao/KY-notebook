@@ -105,6 +105,14 @@ export function initNotebook() {
 
   /* 以 (cx, cy) 为锚点缩放：缩放前后让这个点在屏幕上不动 */
   function setZoom(z, cx, cy) {
+    z = Math.max(0.3, Math.min(5, z));
+    /* 滚动模式：只改页宽，不碰（已经隐藏的）画布布局 */
+    if (scrollOn) {
+      board.zoom = z;
+      applyScrollZoom();
+      paintZoom();
+      return;
+    }
     const r = stageEl.getBoundingClientRect();
     const px = cx == null ? r.width / 2 : cx - r.left;
     const py = cy == null ? r.height / 2 : cy - r.top;
@@ -120,6 +128,7 @@ export function initNotebook() {
   $('inkZoomIn').onclick = () => setZoom((board.zoom || 1) + 0.15);
   $('inkZoomOut').onclick = () => setZoom((board.zoom || 1) - 0.15);
   $('inkZoomFit').onclick = () => {
+    if (scrollOn) { board.zoom = 1; applyScrollZoom(); paintZoom(); return; }
     board.setZoom(1);
     stageEl.scrollTo({ left: 0, top: 0 });
     paintZoom();
@@ -2092,11 +2101,14 @@ export function initNotebook() {
         ctx.fillRect(0, 0, c.width, c.height);
         await page.render({ canvasContext: ctx, viewport: vp }).promise;
         const url = c.toDataURL('image/jpeg', 0.82);
-        const pg = { no: base + i - 1, template: 'blank', strokes: [], items: [], bg: url };
+        /* 每页按自己的宽高比设画布：A4 纵向就竖着放，塞进默认的横向页会被裁掉两头 */
+        const pw = PAGE_W;
+        const ph = Math.round(PAGE_W * (vp.height / Math.max(1, vp.width)));
+        const pg = { no: base + i - 1, template: 'blank', strokes: [], items: [], bg: url, pw, ph };
         st.pages.push(pg);
         await store.putPage({
           id: `${id}#${pg.no}`, noteId: id, no: pg.no,
-          template: 'blank', strokes: [], items: [], bg: url,
+          template: 'blank', strokes: [], items: [], bg: url, pw, ph,
         });
       }
       st.note.pageCount = st.pages.length;
@@ -2234,11 +2246,87 @@ export function initNotebook() {
     pendingTex.clear();
     clearTimeout(texTimer);
     try { clearLasso(); } catch (e) { /* 初始化早期还没定义 */ }
+    board.setPageSize(p.pw || PAGE_W, p.ph || PAGE_H);
     board.loadPage({ template: p.template, bg: p.bg, strokes: p.strokes, items: p.items });
     renderItems();
     tplSel.value = p.template || 'blank';
     pageInfo.textContent = `第 ${st.idx + 1} / ${st.pages.length} 页`;
   }
+
+  /* ---------- 连续滚动：整本纵向排列，点哪页回哪页写 ----------
+     每页导出一张「底图 + 笔迹 + 文字」的快照，纵向排开 —— 翻页从「点按钮」
+     变成「往下滑」，长文档 / 试卷一眼看到底。点某页就切回那一页正常书写。 */
+  let scrollOn = false;
+  let scrollBusy = false;
+  let scrollZoom0 = 1;      /* 进滚动前编辑视图的缩放，退出时还回去 */
+
+  function applyScrollZoom() {
+    const wrap = $('inkScroll');
+    if (!scrollOn || wrap.hidden) return;
+    const cw = Math.max(240, wrap.clientWidth - 28);
+    const w = Math.round(cw * Math.max(0.4, Math.min(1.6, board.zoom || 1)));
+    wrap.querySelectorAll('.pg').forEach((d) => { d.style.width = w + 'px'; });
+  }
+
+  function closeScroll() {
+    if (!scrollOn) return;
+    scrollOn = false;
+    const wrap = $('inkScroll');
+    wrap.hidden = true;
+    wrap.innerHTML = '';
+    $('inkStage').hidden = false;
+    $('inkScrollToggle').classList.remove('on');
+    board.setZoom(scrollZoom0);
+    board.layout();
+  }
+
+  async function openScroll() {
+    if (!st.note || st.mode === 'md' || !st.pages.length || scrollBusy) return;
+    scrollBusy = true;
+    const wrap = $('inkScroll');
+    const cur = st.idx;
+    try {
+      await saveNow();                 /* 当前页的改动先落进 st.pages，导出才是最新的 */
+      const keepUndo = board.undoStack.slice();
+      scrollZoom0 = board.zoom || 1;
+      board.zoom = 1;                  /* 滚动视图先按「适应宽度」排，想看大再按 + */
+      wrap.hidden = false;
+      wrap.innerHTML = '<div class="tip">正在生成页面预览…</div>';
+      $('inkStage').hidden = true;
+      $('inkScrollToggle').classList.add('on');
+      scrollOn = true;
+      const frag = document.createDocumentFragment();
+      for (let i = 0; i < st.pages.length; i++) {
+        const p = st.pages[i];
+        board.setPageSize(p.pw || PAGE_W, p.ph || PAGE_H);
+        board.loadPage({ template: p.template, bg: p.bg, strokes: p.strokes, items: p.items });
+        const url = await board.exportPng(1.3);
+        const d = document.createElement('div');
+        d.className = 'pg' + (i === cur ? ' on' : '');
+        d.innerHTML = `<img src="${url}" alt="第 ${p.no + 1} 页"><span class="no">${p.no + 1} / ${st.pages.length}</span>`;
+        d.onclick = () => { closeScroll(); loadPage(i); };
+        frag.appendChild(d);
+      }
+      wrap.innerHTML = '';
+      wrap.appendChild(frag);
+      /* 导出时在 board 上换来换去，恢复当前页 */
+      const cp = st.pages[cur];
+      board.setPageSize(cp.pw || PAGE_W, cp.ph || PAGE_H);
+      board.loadPage({ template: cp.template, bg: cp.bg, strokes: cp.strokes, items: cp.items });
+      board.undoStack = keepUndo;      /* 只是看了下整本，撤销历史别丢 */
+      renderItems();
+      applyScrollZoom();
+      const on = wrap.querySelector('.pg.on');
+      if (on && on.scrollIntoView) on.scrollIntoView({ block: 'start' });
+    } catch (e) {
+      toast('生成预览失败：' + (e && e.message ? e.message : e), true);
+      closeScroll();
+    } finally {
+      scrollBusy = false;
+    }
+  }
+
+  $('inkScrollToggle').onclick = () => { if (scrollOn) closeScroll(); else openScroll(); };
 
   function curIdx() { return (P.on && P.act === 1) ? P.i2 : st.idx; }
 
@@ -2547,6 +2635,24 @@ export function initNotebook() {
     if (st.note) { st.note.mdInk = mdInk.serialize(); saveSoon(false); }
   };
 
+  /* 文字笔记的字号：WebView 的页面缩放已经关了（避免坐标错位），
+     所以放大靠调字号，文档排版跟着一起变 */
+  const MD_FONT_KEY = 'kynb_mdfont';
+  let mdFont = 14.5;
+  try { mdFont = Math.max(11, Math.min(26, Number(localStorage.getItem(MD_FONT_KEY)) || 14.5)); } catch (e) { mdFont = 14.5; }
+  function applyMdFont() {
+    $('inkMdView').style.fontSize = mdFont + 'px';
+    try { localStorage.setItem(MD_FONT_KEY, String(mdFont)); } catch (e) { /* 无痕 */ }
+  }
+  function bumpMdFont(d) {
+    mdFont = Math.max(11, Math.min(26, Math.round((mdFont + d) * 10) / 10));
+    applyMdFont();
+    mdInk.draw();               /* 字号变了内容高度变，重绘一下笔迹 */
+    $('inkMdInfo').textContent = `${(st.md || '').length} 字 · 字号 ${mdFont}px`;
+  }
+  $('inkMdFontIn').onclick = () => bumpMdFont(1);
+  $('inkMdFontOut').onclick = () => bumpMdFont(-1);
+
   function paintMdPenBtn() {
     $('inkMdPen').classList.toggle('on', mdInk.on);
   }
@@ -2610,6 +2716,7 @@ export function initNotebook() {
   }
 
   async function openMdNote(n) {
+    if (scrollOn) closeScroll();
     st.mode = 'md';
     st.md = n.md || '';
     st.pages = [];
@@ -2635,6 +2742,7 @@ export function initNotebook() {
     paintMdPenBtn();
     await mdInto($('inkMdView'), st.md);
     mdInk.draw();
+    applyMdFont();
     $('inkMdInfo').textContent = `${(st.md || '').length} 字`;
     renderSrc(n.src || null);
   }
@@ -2652,6 +2760,7 @@ export function initNotebook() {
   };
 
   async function openNote(id) {
+    if (scrollOn) closeScroll();
     if (P.on) splitOff();
     const n = await store.getNote(id);
     if (!n) return;
@@ -2669,6 +2778,7 @@ export function initNotebook() {
       no: p.no, template: p.template || 'blank', strokes: p.strokes || [],
       items: Array.isArray(p.items) ? p.items : [],   /* 重开笔记要带上插入的图片/文字 */
       bg: p.bg || null,
+      pw: p.pw || 0, ph: p.ph || 0,                   /* 每页自己的版式（PDF 页可能是纵向） */
     })) : [{ no: 0, template: 'blank', strokes: [], items: [], bg: null }];
     st.pages.sort((a, b) => a.no - b.no);
     st.idx = 0;

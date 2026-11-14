@@ -109,6 +109,7 @@
           <span id="inkZoomInfo" title="滚轮缩放 / 双指捏合">100%</span>
           <button class="tool" id="inkZoomIn" title="放大">＋</button>
           <button class="tool" id="inkZoomFit" title="回到适应窗口">⤢</button>
+          <button class="tool" id="inkScrollToggle" title="整本连起来滚动看；点某一页就回到那一页写">☰</button>
         </div>
         <div class="group pager">
           <button class="tool" id="inkPrev" title="上一页">‹</button>
@@ -119,6 +120,7 @@
         </div>
       </div>
 
+      <div class="stage-scroll" id="inkScroll" hidden></div>
       <div class="stage" id="inkStage">
         <div class="paper" id="inkPaper">
           <div class="ink-items below" id="inkItemsBelow"></div>
@@ -200,6 +202,8 @@
           <button class="btn mini" id="inkMdErase" title="橡皮：点一下删掉那一笔">橡皮</button>
           <button class="btn mini" id="inkMdUndo" title="撤销上一笔">撤销</button>
           <button class="btn mini danger" id="inkMdClear" title="清空这一篇上的手写笔迹">清空笔迹</button>
+          <button class="btn mini" id="inkMdFontOut" title="字小一点">A−</button>
+          <button class="btn mini" id="inkMdFontIn" title="字大一点">A＋</button>
           <span class="hint" id="inkMdInfo"></span>
           <span class="spacer"></span>
           <button class="btn mini" id="inkMdSave" hidden>保存</button>

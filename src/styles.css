@@ -124,9 +124,18 @@ main{height:calc(100% - 54px)}
 .sel select{border:1px solid var(--line);border-radius:8px;padding:4px 6px;font-size:12.5px}
 .pager{font-size:12.5px;color:var(--sub)}
 .pager .tool{width:auto;min-width:30px;padding:0 7px}
+.stage-scroll{flex:1;min-height:0;overflow:auto;padding:14px;background:var(--paper);-webkit-overflow-scrolling:touch}
+.stage-scroll[hidden]{display:none}
+.stage-scroll .pg{position:relative;margin:0 auto 14px;background:#fff;border-radius:3px;overflow:hidden;
+  box-shadow:0 1px 6px rgba(60,40,10,.16);cursor:pointer}
+.stage-scroll .pg img{display:block;width:100%}
+.stage-scroll .pg .no{position:absolute;right:8px;bottom:8px;font-size:12px;color:#fff;background:rgba(0,0,0,.45);
+  padding:1px 7px;border-radius:9px;pointer-events:none}
+.stage-scroll .pg.on{outline:2px solid rgba(122,90,248,.55)}
+.stage-scroll .tip{text-align:center;color:var(--ink-2);font-size:13px;padding:6px 0 14px}
 .stage{flex:1;overflow:auto;display:flex;align-items:flex-start;justify-content:flex-start;padding:14px;
   overscroll-behavior:contain;touch-action:none}
-.paper{position:relative;flex:0 0 auto;margin:0 auto;background:#fff center/cover no-repeat;
+.paper{position:relative;flex:0 0 auto;margin:0 auto;background:#fff center/contain no-repeat;
   box-shadow:0 2px 12px rgba(60,45,25,.16);border-radius:3px}
 .paper canvas{display:block;border-radius:3px;touch-action:none}
 .paper.tpl-lines{background-image:repeating-linear-gradient(180deg,transparent 0 27px,#e8e0d2 27px 28px);background-repeat:repeat}
