@@ -2173,7 +2173,8 @@ export function initNotebook() {
       st.note.md = st.md || '';
       /* 手写批注跟着文字笔记一起存 */
       st.note.mdInk = mdInk.serialize();
-      st.note.mdInkOn = mdInk.on;
+      /* 不要存 mdInk.on：那只是 UI 上的临时开关（进编辑模式会临时关掉），
+         存下来会变成「下次打开永远写不了」。 */
       st.note.pageCount = 1;
       st.note.updatedAt = Date.now();
       await store.putNote({ ...st.note });
@@ -2754,6 +2755,7 @@ export function initNotebook() {
   }
   $('inkMdPen').onclick = () => {
     mdInk.setOn(!mdInk.on);
+    st.mdInkOn = mdInk.on;
     paintMdPenBtn();
     if (!mdInk.on) toast('批注已关：现在手指可以选中文字、复制');
   };
@@ -2805,7 +2807,8 @@ export function initNotebook() {
       $('inkMdSrc').setSelectionRange(0, 0);
       $('inkMdSrc').focus();
     } else {
-      mdInk.setOn(st.mdInkOn !== false);
+      mdInk.setOn(true);
+      st.mdInkOn = true;
       paintMdPenBtn();
       mdInk.draw();
     }
@@ -2832,9 +2835,10 @@ export function initNotebook() {
     $('inkExportPng').hidden = true;
     pageInfo.textContent = '文字笔记';
     setMdEditing(false);
-    st.mdInkOn = n.mdInkOn !== false;
+    /* 批注默认开着：以前从 note.mdInkOn 读，一旦被存成 false 就再也写不了 */
+    st.mdInkOn = true;
     mdInk.load(n.mdInk || null);
-    mdInk.setOn(st.mdInkOn);
+    mdInk.setOn(true);
     paintMdPenBtn();
     await mdInto($('inkMdView'), st.md);
     mdInk.draw();
