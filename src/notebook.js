@@ -2494,6 +2494,17 @@ export function initNotebook() {
       try { new ResizeObserver(() => this.draw()).observe(body); } catch (e) { /* 老内核 */ }
     }
 
+    /* 这支笔算不算「笔」。
+       坑：华为 M-Pencil 在安卓 WebView 里上报的 pointerType 是 'touch'
+       （不是 'pen'），但压力值是真实的（实测 3.2）；手指的压力只有 0 或 1。
+       只认 pointerType==='pen' 会导致笔被当成手指 → 只会滚动、写不了字。 */
+    _isPen(e) {
+      if (e.pointerType === 'pen') return true;
+      const p = Number(e.pressure) || 0;
+      if (p > 1.05) return true;
+      return false;
+    }
+
     /* 视口坐标 → 文档坐标。
        canvas 只盖住可视区，文档被 zoom 放大、还能左右上下滚，
        所以要先加回滚动量，再除以缩放比例，换算到「未缩放的文档坐标」。 */
@@ -2614,7 +2625,7 @@ export function initNotebook() {
       let drag = null;
       const down = (e) => {
         if (!this.on) return;
-        if (e.pointerType !== 'pen') {
+        if (!this._isPen(e)) {
           if (this._st) return;
           if (drag && drag.id !== e.pointerId) { drag = null; return; }   /* 第二根手指：捏合缩放 */
           drag = { id: e.pointerId, x: e.clientX, y: e.clientY,
@@ -2752,12 +2763,13 @@ export function initNotebook() {
 
   function paintMdPenBtn() {
     $('inkMdPen').classList.toggle('on', mdInk.on);
+    $('inkMdPen').textContent = mdInk.on ? '✍ 批注：开' : '✍ 批注：关';
   }
   $('inkMdPen').onclick = () => {
     mdInk.setOn(!mdInk.on);
     st.mdInkOn = mdInk.on;
     paintMdPenBtn();
-    if (!mdInk.on) toast('批注已关：现在手指可以选中文字、复制');
+    toast(mdInk.on ? '批注已开：用笔直接在文档上写' : '批注已关：手指可以选中文字、复制');
   };
   $('inkMdErase').onclick = () => {
     const er = mdInk.tool !== 'er';
