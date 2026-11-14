@@ -292,15 +292,16 @@ main{height:calc(100% - 54px)}
 .md-wrap{flex:1;min-height:0;display:flex;flex-direction:column;overflow:hidden}
 .md-wrap[hidden]{display:none}
 .md-bar{display:flex;align-items:center;gap:8px;padding:6px 10px;border-bottom:1px solid var(--line);
-  background:#fffdf8}
+  background:#fffdf8;flex-wrap:wrap}
 .md-view{flex:1;min-height:0;border:0;border-radius:0;padding:20px 26px;max-width:860px;width:100%;
   margin:0 auto;font-size:14.5px}
 /* 文字笔记的滚动容器 + 手写批注层：文档照常渲染，笔迹盖在上面 */
 .md-stage{position:relative;flex:1;min-height:0;display:flex}
-.md-body{flex:1;min-height:0;overflow:auto;background:#fffdf8;-webkit-overflow-scrolling:touch}
-.md-body .md-view{flex:none;min-height:0}
+.md-body{flex:1;min-height:0;overflow:auto;background:#fffdf8;-webkit-overflow-scrolling:touch;
+  touch-action:pan-x pan-y;overscroll-behavior:contain}
+.md-body .md-view{flex:none;min-height:0;zoom:1}
 #mdInk{position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none;z-index:5}
-.md-stage.pen #mdInk{pointer-events:auto;cursor:crosshair;touch-action:pan-y}
+.md-stage.pen #mdInk{pointer-events:auto;cursor:crosshair;touch-action:none}
 /* 编辑时上下分栏：上面还是排好版的文档，下面才是 markdown 源码 */
 .md-wrap.editing .md-body{flex:1 1 0;min-height:110px;border-bottom:1px solid var(--line)}
 .md-wrap.editing .md-stage{flex:1 1 0;min-height:110px;border-bottom:1px solid var(--line)}

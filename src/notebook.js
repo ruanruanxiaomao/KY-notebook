@@ -98,7 +98,16 @@ export function initNotebook() {
   const zoomInfo = $('inkZoomInfo');
   const ZOOM_KEY = 'kynb_zoom';
 
+  /* 文字笔记用的是自己的页面缩放（mdZoom），顶部这排 ± / 百分比 / ⤢ 也要跟着它走，
+     否则在文字笔记里点顶部缩放就像「没反应」。mdZoom 定义在下面，用 try 兜 TDZ。 */
+  function mdZoomLive() {
+    try { return typeof mdZoom === 'number' ? mdZoom : null; } catch (e) { return null; }
+  }
   function paintZoom() {
+    if (st.mode === 'md') {
+      const z = mdZoomLive();
+      if (z != null) { zoomInfo.textContent = Math.round(z * 100) + '%'; return; }
+    }
     zoomInfo.textContent = Math.round((board.zoom || 1) * 100) + '%';
     try { localStorage.setItem(ZOOM_KEY, String(board.zoom || 1)); } catch (e) { /* 无痕模式忽略 */ }
   }
@@ -125,9 +134,16 @@ export function initNotebook() {
     paintZoom();
   }
 
-  $('inkZoomIn').onclick = () => setZoom((board.zoom || 1) + 0.15);
-  $('inkZoomOut').onclick = () => setZoom((board.zoom || 1) - 0.15);
+  $('inkZoomIn').onclick = () => {
+    if (st.mode === 'md' && mdZoomLive() != null) { bumpMdZoom(0.1); return; }
+    setZoom((board.zoom || 1) + 0.15);
+  };
+  $('inkZoomOut').onclick = () => {
+    if (st.mode === 'md' && mdZoomLive() != null) { bumpMdZoom(-0.1); return; }
+    setZoom((board.zoom || 1) - 0.15);
+  };
   $('inkZoomFit').onclick = () => {
+    if (st.mode === 'md' && mdZoomLive() != null) { mdZoom = 1; applyMdZoom(true); mdInk.draw(); return; }
     if (scrollOn) { board.zoom = 1; applyScrollZoom(); paintZoom(); return; }
     board.setZoom(1);
     stageEl.scrollTo({ left: 0, top: 0 });
@@ -2471,15 +2487,20 @@ export function initNotebook() {
       this.size = 2.2;
       this.on = false;
       this._st = null;
+      this.z = 1;                        /* 文档当前的缩放比例（跟着 md-view 的 zoom 走） */
       this.onChange = null;
       this.bind();
       try { new ResizeObserver(() => this.draw()).observe(body); } catch (e) { /* 老内核 */ }
     }
 
-    /* 视口坐标 → 文档坐标（canvas 的 top 一直跟着 scrollTop） */
+    /* 视口坐标 → 文档坐标。
+       canvas 只盖住可视区，文档被 zoom 放大、还能左右上下滚，
+       所以要先加回滚动量，再除以缩放比例，换算到「未缩放的文档坐标」。 */
     _pt(e) {
       const r = this.cv.getBoundingClientRect();
-      return [e.clientX - r.left, e.clientY - r.top + this.body.scrollTop];
+      const z = this.z || 1;
+      return [(e.clientX - r.left + this.body.scrollLeft) / z,
+              (e.clientY - r.top + this.body.scrollTop) / z];
     }
 
     load(data) {
@@ -2526,7 +2547,8 @@ export function initNotebook() {
       if (!n) return;
       ctx.strokeStyle = s.c || '#c0392b';
       ctx.fillStyle = ctx.strokeStyle;
-      ctx.lineWidth = Math.max(0.6, s.w || 2);
+      /* 画布整体按缩放比例放大了，线宽除回去 —— 笔迹视觉粗细不跟着变 */
+      ctx.lineWidth = Math.max(0.4, (s.w || 2) / (this.z || 1));
       ctx.lineCap = 'round';
       ctx.lineJoin = 'round';
       if (n === 1 || (n === 2 && Math.hypot(pts[3] - pts[0], pts[4] - pts[1]) < 1)) {
@@ -2560,9 +2582,11 @@ export function initNotebook() {
         this.cv.height = Math.round(h * dpr);
       }
       const ctx = this.ctx;
+      const z = this.z || 1;
       ctx.setTransform(1, 0, 0, 1, 0, 0);
       ctx.clearRect(0, 0, this.cv.width, this.cv.height);
-      ctx.setTransform(dpr, 0, 0, dpr, 0, -this.body.scrollTop * dpr);
+      ctx.setTransform(dpr * z, 0, 0, dpr * z,
+        -this.body.scrollLeft * dpr, -this.body.scrollTop * dpr);
       for (const s of this.strokes) this._paint(s);
       if (this._st) this._paint(this._st);
     }
@@ -2583,9 +2607,20 @@ export function initNotebook() {
 
     bind() {
       const cv = this.cv;
+      /* 手指拖动 = 翻页滚动。canvas 盖在文档上，touch-action:none 会连手指滚动一起
+         禁掉（这就是「放大以后拖不动」的原因），所以这里自己接管滚动。
+         笔（pointerType==='pen'）才写字，手指一律只滚。 */
+      let drag = null;
       const down = (e) => {
         if (!this.on) return;
-        if (e.pointerType !== 'pen') return;      /* 手指让给滚动 */
+        if (e.pointerType !== 'pen') {
+          if (this._st) return;
+          if (drag && drag.id !== e.pointerId) { drag = null; return; }   /* 第二根手指：捏合缩放 */
+          drag = { id: e.pointerId, x: e.clientX, y: e.clientY,
+                   st: this.body.scrollTop, sl: this.body.scrollLeft, moved: false };
+          try { cv.setPointerCapture(e.pointerId); } catch (err) { /* 合成事件会抛 */ }
+          return;
+        }
         if (this._st) return;
         e.preventDefault();
         try { cv.setPointerCapture(e.pointerId); } catch (err) { /* 合成事件会抛 */ }
@@ -2594,6 +2629,14 @@ export function initNotebook() {
         this.draw();
       };
       const move = (e) => {
+        if (drag && e.pointerId === drag.id) {
+          const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+          if (Math.abs(dx) > 2 || Math.abs(dy) > 2) drag.moved = true;
+          this.body.scrollTop = drag.st - dy;
+          this.body.scrollLeft = drag.sl - dx;
+          this.draw();
+          return;
+        }
         if (!this._st || e.pointerId !== this._st.pid) return;
         e.preventDefault();
         const [x, y] = this._pt(e);
@@ -2603,6 +2646,7 @@ export function initNotebook() {
         this.draw();
       };
       const up = (e) => {
+        if (drag && e.pointerId === drag.id) { drag = null; return; }
         if (!this._st || e.pointerId !== this._st.pid) return;
         const s = this._st;
         this._st = null;
@@ -2635,23 +2679,75 @@ export function initNotebook() {
     if (st.note) { st.note.mdInk = mdInk.serialize(); saveSoon(false); }
   };
 
-  /* 文字笔记的字号：WebView 的页面缩放已经关了（避免坐标错位），
-     所以放大靠调字号，文档排版跟着一起变 */
-  const MD_FONT_KEY = 'kynb_mdfont';
-  let mdFont = 14.5;
-  try { mdFont = Math.max(11, Math.min(26, Number(localStorage.getItem(MD_FONT_KEY)) || 14.5)); } catch (e) { mdFont = 14.5; }
-  function applyMdFont() {
-    $('inkMdView').style.fontSize = mdFont + 'px';
-    try { localStorage.setItem(MD_FONT_KEY, String(mdFont)); } catch (e) { /* 无痕 */ }
+  /* 文字笔记的「页面缩放」：整篇文档一起放大（字号、行距、标题、表格全都变），
+     放大后可以上下左右拖着看 —— 跟看 PDF 一样。
+     不再用改字号的办法：那样只有正文变大，页面和标题比例都乱。 */
+  const MD_ZOOM_KEY = 'kynb_mdzoom';
+  let mdZoom = 1;
+  try {
+    const v = Number(localStorage.getItem(MD_ZOOM_KEY));
+    mdZoom = Math.max(0.6, Math.min(2.6, v || 1));
+  } catch (e) { mdZoom = 1; }
+
+  function applyMdZoom(keepCenter) {
+    const body = $('mdBody');
+    const oldH = body.scrollHeight || 1;
+    const cy = (body.scrollTop + body.clientHeight / 2) / oldH;
+    const cx = (body.scrollLeft + body.clientWidth / 2) / (body.scrollWidth || 1);
+    $('inkMdView').style.zoom = mdZoom;
+    mdInk.z = mdZoom;
+    try { localStorage.setItem(MD_ZOOM_KEY, String(mdZoom)); } catch (e) { /* 无痕 */ }
+    if (keepCenter) {
+      /* 缩放前后尽量停在原来的位置（不然一跳就到别处去了） */
+      requestAnimationFrame(() => {
+        body.scrollTop = Math.max(0, cy * body.scrollHeight - body.clientHeight / 2);
+        body.scrollLeft = Math.max(0, cx * body.scrollWidth - body.clientWidth / 2);
+        mdInk.draw();
+      });
+    }
+    paintMdZoom();
   }
-  function bumpMdFont(d) {
-    mdFont = Math.max(11, Math.min(26, Math.round((mdFont + d) * 10) / 10));
-    applyMdFont();
-    mdInk.draw();               /* 字号变了内容高度变，重绘一下笔迹 */
-    $('inkMdInfo').textContent = `${(st.md || '').length} 字 · 字号 ${mdFont}px`;
+  function paintMdZoom() {
+    const pct = Math.round(mdZoom * 100);
+    $('inkMdZoomVal').textContent = pct + '%';
+    const zi = document.getElementById('inkZoomInfo');
+    if (zi) zi.textContent = pct + '%';
+    $('inkMdFontOut').disabled = mdZoom <= 0.6;
+    $('inkMdFontIn').disabled = mdZoom >= 2.6;
+    if (!st.mdEditing) $('inkMdInfo').textContent = `${(st.md || '').length} 字 · ${pct}%`;
   }
-  $('inkMdFontIn').onclick = () => bumpMdFont(1);
-  $('inkMdFontOut').onclick = () => bumpMdFont(-1);
+  function bumpMdZoom(d) {
+    mdZoom = Math.max(0.6, Math.min(2.6, Math.round((mdZoom + d) * 100) / 100));
+    applyMdZoom(true);
+    mdInk.draw();
+  }
+  $('inkMdFontIn').onclick = () => bumpMdZoom(0.1);
+  $('inkMdFontOut').onclick = () => bumpMdZoom(-0.1);
+  $('inkMdZoomFit').onclick = () => { mdZoom = 1; applyMdZoom(true); mdInk.draw(); };
+  /* 双指捏合缩放（笔写的时候不拦，手指两指才拦） */
+  (function bindMdPinch() {
+    const body = $('mdStage') || $('mdBody');   /* canvas 盖在 body 上，绑 body 收不到 */
+    let d0 = 0, z0 = 1, pinching = false;
+    body.addEventListener('touchstart', (e) => {
+      if (e.touches.length !== 2) return;
+      const [a, b] = e.touches;
+      d0 = Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY) || 1;
+      z0 = mdZoom;
+      pinching = true;
+    }, { passive: true });
+    body.addEventListener('touchmove', (e) => {
+      if (!pinching || e.touches.length !== 2) return;
+      const [a, b] = e.touches;
+      const d = Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY) || 1;
+      const z = Math.max(0.6, Math.min(2.6, Math.round(z0 * d / d0 * 100) / 100));
+      if (z !== mdZoom) { mdZoom = z; applyMdZoom(true); }
+    }, { passive: true });
+    body.addEventListener('touchend', () => {
+      if (!pinching) return;
+      pinching = false;
+      mdInk.draw();
+    }, { passive: true });
+  })();
 
   function paintMdPenBtn() {
     $('inkMdPen').classList.toggle('on', mdInk.on);
@@ -2742,7 +2838,7 @@ export function initNotebook() {
     paintMdPenBtn();
     await mdInto($('inkMdView'), st.md);
     mdInk.draw();
-    applyMdFont();
+    applyMdZoom(false);
     $('inkMdInfo').textContent = `${(st.md || '').length} 字`;
     renderSrc(n.src || null);
   }
