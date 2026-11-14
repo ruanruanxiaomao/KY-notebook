@@ -26,3 +26,7 @@ android/_work/
 bridge/.bridge_token
 bridge/outbox.json
 bridge/__pycache__/
+
+# 本地测试截图
+shot_*.png
+md_ink*.png
